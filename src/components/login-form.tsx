@@ -1,9 +1,10 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import { loginAction, type LoginState } from "@/app/login/actions";
 
 export function LoginForm() {
+  const [logoFailed, setLogoFailed] = useState(false);
   const [state, action, pending] = useActionState<LoginState, FormData>(
     loginAction,
     {},
@@ -12,11 +13,30 @@ export function LoginForm() {
   return (
     <form
       action={action}
-      className="surface-card w-full max-w-md p-8 md:p-9"
+      className="surface-card login-card animate-fade-up w-full max-w-md p-8 md:p-9"
     >
-      <h1 className="mb-6 text-2xl font-bold text-slate-800">
-        تسجيل الدخول للنظام
-      </h1>
+      <div className="mb-5 flex justify-center">
+        <div className="login-logo-shell">
+          {!logoFailed ? (
+            // ضع ملف اللوغو في public باسم aleppo-eagle.png
+            <img
+              src="/aleppo-eagle.png"
+              alt="شعار النظام"
+              className="h-16 w-16 object-contain"
+              onError={() => setLogoFailed(true)}
+            />
+          ) : (
+            <span className="text-sm font-bold tracking-wide text-amber-200">
+              MED
+            </span>
+          )}
+        </div>
+      </div>
+
+      <h1 className="mb-2 text-center text-2xl font-bold text-slate-800">تسجيل الدخول</h1>
+      <p className="mb-6 text-center text-sm text-slate-500">
+        ادخل بيانات حسابك للوصول إلى لوحة التحكم
+      </p>
 
       <label className="mb-2 block text-sm font-medium text-slate-700">
         البريد الإلكتروني
@@ -49,9 +69,12 @@ export function LoginForm() {
       <button
         type="submit"
         disabled={pending}
-        className="w-full rounded-xl bg-blue-700 px-4 py-2.5 font-semibold text-white transition-colors hover:bg-blue-800 disabled:opacity-60"
+        className="login-submit-btn h-10 w-full rounded-xl px-3 text-sm font-semibold text-white disabled:opacity-60"
       >
-        {pending ? "جاري الدخول..." : "دخول"}
+        <span className="login-submit-inner">
+          {pending ? <span className="login-spinner" aria-hidden="true" /> : null}
+          <span>{pending ? "جاري الدخول..." : "دخول"}</span>
+        </span>
       </button>
     </form>
   );

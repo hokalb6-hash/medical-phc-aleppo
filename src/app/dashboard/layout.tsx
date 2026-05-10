@@ -31,13 +31,22 @@ export default async function DashboardLayout({
     <div className="min-h-screen p-4 md:p-6 lg:p-8">
       <header className="surface-card mb-6 px-5 py-4 md:px-6 md:py-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="text-lg font-bold text-slate-800 md:text-xl">
+          <div className="flex items-center gap-3">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white ring-2 ring-amber-200/70 shadow-sm">
+              <img
+                src="/aleppo-eagle.png"
+                alt="شعار النظام"
+                className="h-9 w-9 object-contain"
+              />
+            </div>
+            <div>
+              <h1 className="text-lg font-bold text-slate-800 md:text-xl">
               نظام إدارة المراكز الطبية
-            </h1>
-            <p className="text-sm text-slate-600">
-              {profile.full_name} - {profile.role}
-            </p>
+              </h1>
+              <p className="text-sm text-slate-600">
+                {profile.full_name} - {profile.role}
+              </p>
+            </div>
           </div>
           <form action={signOut}>
             <button

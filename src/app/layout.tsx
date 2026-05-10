@@ -15,6 +15,11 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "نظام إدارة المراكز الطبية",
   description: "منصة احترافية لإدارة المراكز والعيادات والتقارير الشهرية.",
+  icons: {
+    icon: "/aleppo-eagle.png",
+    shortcut: "/aleppo-eagle.png",
+    apple: "/aleppo-eagle.png",
+  },
 };
 
 export default function RootLayout({
