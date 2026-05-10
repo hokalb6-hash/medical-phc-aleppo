@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f4f8ff;
+  --foreground: #10233b;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+input,
+select,
+button,
+textarea {
+  font: inherit;
+}
+
+.surface-card {
+  border-radius: 1rem;
+  border: 1px solid rgb(226 232 240 / 0.9);
+  background: rgb(255 255 255 / 0.95);
+  box-shadow:
+    0 1px 2px rgb(15 23 42 / 0.05),
+    0 8px 24px rgb(15 23 42 / 0.04);
+  backdrop-filter: saturate(130%) blur(1.5px);
+}
+
+.content-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 720px;
+}
+
+.field-input,
+.field-select {
+  width: 100%;
+  border-radius: 0.75rem;
+  border: 1px solid rgb(203 213 225);
+  background: rgb(255 255 255);
+  padding: 0.625rem 0.75rem;
+  outline: none;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.field-input:focus,
+.field-select:focus {
+  border-color: rgb(59 130 246);
+  box-shadow: 0 0 0 3px rgb(191 219 254 / 0.6);
+}
+
+.btn-primary,
+.btn-dark,
+.btn-emerald {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.75rem;
+  padding: 0.6rem 1rem;
+  font-weight: 600;
+  color: #fff;
+  transition: background-color 160ms ease;
+}
+
+.btn-primary {
+  background: rgb(29 78 216);
+}
+
+.btn-primary:hover {
+  background: rgb(30 64 175);
+}
+
+.btn-dark {
+  background: rgb(15 23 42);
+}
+
+.btn-dark:hover {
+  background: rgb(30 41 59);
+}
+
+.btn-emerald {
+  background: rgb(4 120 87);
+}
+
+.btn-emerald:hover {
+  background: rgb(5 150 105);
+}
+
+.table-shell {
+  overflow-x: auto;
+  border-radius: 1rem;
+  border: 1px solid rgb(226 232 240);
+  background: #fff;
+}
