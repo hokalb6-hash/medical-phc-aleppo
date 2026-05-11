@@ -2,16 +2,7 @@ import { redirect } from "next/navigation";
 import { requireAuth } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { DashboardNav } from "@/components/dashboard-nav";
-
-const navItems = [
-  { href: "/dashboard", label: "لوحة التحكم" },
-  { href: "/dashboard/centers", label: "المراكز" },
-  { href: "/dashboard/clinics", label: "العيادات" },
-  { href: "/dashboard/daily-entry", label: "الإدخال اليومي" },
-  { href: "/dashboard/owner-daily", label: "استمارة يومية (أصحاب المراكز)" },
-  { href: "/dashboard/owner-monthly", label: "استمارة شهرية (أصحاب المراكز)" },
-  { href: "/dashboard/reports", label: "التقارير" },
-];
+import { ROLE_LABELS_AR } from "@/lib/constants";
 
 export default async function DashboardLayout({
   children,
@@ -19,6 +10,19 @@ export default async function DashboardLayout({
   children: React.ReactNode;
 }) {
   const profile = await requireAuth();
+
+  const navItems = [
+    { href: "/dashboard", label: "لوحة التحكم" },
+    { href: "/dashboard/centers", label: "المراكز" },
+    { href: "/dashboard/clinics", label: "العيادات" },
+    { href: "/dashboard/daily-entry", label: "الإدخال اليومي" },
+    { href: "/dashboard/owner-daily", label: "استمارة يومية (أصحاب المراكز)" },
+    { href: "/dashboard/owner-monthly", label: "استمارة شهرية (أصحاب المراكز)" },
+    {
+      href: "/dashboard/reports",
+      label: profile.role === "center_manager" ? "تقارير العيادات" : "التقارير",
+    },
+  ];
 
   async function signOut() {
     "use server";
@@ -44,7 +48,7 @@ export default async function DashboardLayout({
               نظام إدارة المراكز الطبية
               </h1>
               <p className="text-sm text-slate-600">
-                {profile.full_name} - {profile.role}
+                {profile.full_name} — {ROLE_LABELS_AR[profile.role]}
               </p>
             </div>
           </div>

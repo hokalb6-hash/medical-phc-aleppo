@@ -7,6 +7,7 @@ import { requireAuth } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { DAILY_FIELDS } from "@/lib/constants";
+import { sumDailyEntryFields } from "@/lib/daily-entry-aggregate";
 
 const createCenterSchema = z.object({
   centerName: z.string().min(3, "اسم المركز مطلوب"),
@@ -411,7 +412,29 @@ export async function importDailyEntryCsv(formData: FormData) {
   );
 }
 
-export async function upsertMonthlyCell(formData: FormData) {
+function buildReportsRedirectQuery(formData: FormData): string {
+  const q = new URLSearchParams();
+  const month = formData.get("ctxMonth");
+  const year = formData.get("ctxYear");
+  const clinicId = formData.get("ctxClinicId");
+  const centerId = formData.get("ctxCenterId");
+  const view = formData.get("ctxView");
+  const date = formData.get("ctxDate");
+  const source = formData.get("ctxSource");
+  if (month) q.set("month", String(month));
+  if (year) q.set("year", String(year));
+  if (clinicId) q.set("clinicId", String(clinicId));
+  if (centerId) q.set("centerId", String(centerId));
+  if (view) q.set("view", String(view));
+  if (date) q.set("date", String(date));
+  if (source === "owner_daily_form" || source === "owner_monthly_form") {
+    q.set("source", String(source));
+  }
+  return q.toString();
+}
+
+/** إضافة يوم واحد فقط — لا تحديث ليوم مسجّل مسبقاً */
+export async function insertMonthlyReportCell(formData: FormData) {
   const actor = await requireAuth();
   if (actor.role === "center_user") {
     throw new Error("غير مصرح.");
@@ -423,24 +446,125 @@ export async function upsertMonthlyCell(formData: FormData) {
   const doctorName = String(formData.get("doctorName") ?? "");
   const patientCount = Number(formData.get("patientCount") ?? 0);
   const notes = String(formData.get("notes") ?? "");
+  const back = buildReportsRedirectQuery(formData);
 
-  const { error } = await supabase.from("monthly_report_cells").upsert(
-    {
-      report_id: reportId,
-      report_date: reportDate,
-      doctor_name: doctorName || null,
-      patient_count: patientCount,
-      notes: notes || null,
-      created_by: actor.id,
-    },
-    { onConflict: "report_id,report_date" },
-  );
+  const { data: existing } = await supabase
+    .from("monthly_report_cells")
+    .select("id")
+    .eq("report_id", reportId)
+    .eq("report_date", reportDate)
+    .maybeSingle();
+
+  if (existing) {
+    const q = new URLSearchParams(back);
+    q.set(
+      "error",
+      `هذا التاريخ (${reportDate}) مضاف مسبقاً إلى التقرير الشهري ولا يمكن إعادة تعبئته. اختر يوماً آخر أو استخدم التوليد من الإدخال اليومي للأيام غير المضافة.`,
+    );
+    redirect(`/dashboard/reports?${q.toString()}`);
+  }
+
+  const { error } = await supabase.from("monthly_report_cells").insert({
+    report_id: reportId,
+    report_date: reportDate,
+    doctor_name: doctorName || null,
+    patient_count: patientCount,
+    notes: notes || null,
+    created_by: actor.id,
+  });
 
   if (error) {
+    if (error.code === "23505") {
+      const q = new URLSearchParams(back);
+      q.set("error", "هذا اليوم مسجل بالفعل (تعارض). لا يمكن الإضافة مرتين.");
+      redirect(`/dashboard/reports?${q.toString()}`);
+    }
     throw new Error(error.message);
   }
 
   revalidatePath("/dashboard/reports");
+  const q = new URLSearchParams(back);
+  q.set("success", "تمت إضافة اليوم إلى التقرير الشهري. لا يمكن إضافة نفس التاريخ مرتين.");
+  redirect(`/dashboard/reports?${q.toString()}`);
+}
+
+/**
+ * يضيف صفوفاً للتقرير الشهري فقط للأيام التي فيها إدخال يومي فعلي (مجموع المؤشرات &gt; 0)،
+ * ويتخطى أي يوم مضاف مسبقاً — لا تكرار.
+ */
+export async function generateMonthlyCellsFromDailyEntries(formData: FormData) {
+  const actor = await requireAuth();
+  if (actor.role === "center_user") {
+    throw new Error("غير مصرح.");
+  }
+
+  const supabase = await createClient();
+  const reportId = String(formData.get("reportId"));
+  const centerId = String(formData.get("centerId"));
+  const clinicId = String(formData.get("clinicId"));
+  const month = Number(formData.get("month"));
+  const year = Number(formData.get("year"));
+  const back = buildReportsRedirectQuery(formData);
+
+  if (!centerId || !clinicId || !reportId || !month || !year) {
+    const q = new URLSearchParams(back);
+    q.set("error", "بيانات غير كاملة لتوليد الأيام.");
+    redirect(`/dashboard/reports?${q.toString()}`);
+  }
+
+  const [{ data: entries }, { data: existingCells }] = await Promise.all([
+    supabase
+      .from("daily_entries")
+      .select("entry_date, data")
+      .eq("center_id", centerId)
+      .eq("clinic_id", clinicId)
+      .eq("month", month)
+      .eq("year", year),
+    supabase.from("monthly_report_cells").select("report_date").eq("report_id", reportId),
+  ]);
+
+  const existingDates = new Set((existingCells ?? []).map((c) => c.report_date));
+
+  const filledEntries = (entries ?? []).filter(
+    (e) => sumDailyEntryFields(e.data as Record<string, unknown>) > 0,
+  );
+
+  let added = 0;
+
+  for (const entry of filledEntries) {
+    if (existingDates.has(entry.entry_date)) continue;
+
+    const sum = sumDailyEntryFields(entry.data as Record<string, unknown>);
+    const { error } = await supabase.from("monthly_report_cells").insert({
+      report_id: reportId,
+      report_date: entry.entry_date,
+      doctor_name: null,
+      patient_count: sum,
+      notes: "تلقائي من الإدخال اليومي",
+      created_by: actor.id,
+    });
+
+    if (!error) {
+      added += 1;
+      existingDates.add(entry.entry_date);
+    } else if (error.code === "23505") {
+      existingDates.add(entry.entry_date);
+    }
+  }
+
+  revalidatePath("/dashboard/reports");
+  const q = new URLSearchParams(back);
+  if (added > 0) {
+    q.set(
+      "success",
+      `تمت إضافة ${added} يوماً جديداً من الإدخال اليومي المعبأ فقط (تم تخطي أي يوم كان مضافاً مسبقاً للتقرير).`,
+    );
+  } else if (filledEntries.length === 0) {
+    q.set("info", "لا توجد أيام معبأة في الإدخال اليومي لهذا الشهر (مجموع المؤشرات أكبر من صفر).");
+  } else {
+    q.set("info", "كل الأيام المعبأة في الإدخال اليومي مضافة مسبقاً إلى التقرير — لم يُضف صف جديد.");
+  }
+  redirect(`/dashboard/reports?${q.toString()}`);
 }
 
 export async function ensureMonthlyReport(formData: FormData) {
@@ -551,146 +675,4 @@ export async function saveOwnerDailyClinicSheet(formData: FormData) {
   redirect(
     `/dashboard/owner-daily?${resultParams.toString()}&success=${encodeURIComponent("تم الحفظ وبقيت القيم ظاهرة للتعديل")}`,
   );
-}
-
-export async function saveOwnerMonthlySummarySheet(formData: FormData) {
-  const actor = await requireAuth();
-  if (actor.role !== "center_manager") {
-    throw new Error("غير مصرح.");
-  }
-
-  const supabase = await createClient();
-  const centerId = actor.center_id!;
-  const year = Number(formData.get("year"));
-
-  const months = Array.from({ length: 12 }, (_, i) => i + 1);
-  const rows = months.map((month) => {
-    const metrics: Record<string, number> = {};
-
-    DAILY_FIELDS.forEach((field) => {
-      const key = `ms_${month}_${field.key}`;
-      metrics[field.key] = Number(formData.get(key)) || 0;
-    });
-
-    const reviewersTotal = Number(formData.get(`ms_${month}_reviewers_total`)) || 0;
-
-    return {
-      center_id: centerId,
-      year,
-      month,
-      metrics,
-      reviewers_total: reviewersTotal,
-      created_by: actor.id,
-    };
-  });
-
-  const { error } = await supabase
-    .from("owner_monthly_summary_sheet")
-    .upsert(rows, { onConflict: "center_id,year,month" });
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  revalidatePath("/dashboard/owner-monthly");
-}
-
-export async function generateOwnerMonthlyFromDaily(formData: FormData) {
-  const actor = await requireAuth();
-  if (actor.role !== "center_manager") {
-    throw new Error("غير مصرح.");
-  }
-
-  const supabase = await createClient();
-  const centerId = actor.center_id!;
-  const year = Number(formData.get("year"));
-  const scope = String(formData.get("generationScope") ?? "year");
-  const selectedMonth = Number(formData.get("generationMonth") ?? 1);
-  const generationMode = String(formData.get("generationMode") ?? "overwrite");
-
-  const monthsToGenerate =
-    scope === "month" && selectedMonth >= 1 && selectedMonth <= 12
-      ? [selectedMonth]
-      : Array.from({ length: 12 }, (_, i) => i + 1);
-
-  const rows: {
-    center_id: string;
-    year: number;
-    month: number;
-    metrics: Record<string, number>;
-    reviewers_total: number;
-    created_by: string;
-  }[] = [];
-
-  for (const month of monthsToGenerate) {
-    const { data: dailyRows, error } = await supabase
-      .from("daily_entries")
-      .select("data")
-      .eq("center_id", centerId)
-      .eq("year", year)
-      .eq("month", month);
-
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    const metrics: Record<string, number> = {};
-    DAILY_FIELDS.forEach((field) => {
-      metrics[field.key] = 0;
-    });
-
-    (dailyRows ?? []).forEach((row) => {
-      const payload = (row.data ?? {}) as Record<string, unknown>;
-      DAILY_FIELDS.forEach((field) => {
-        const value = payload[field.key];
-        const num = typeof value === "number" ? value : Number(value) || 0;
-        metrics[field.key] += num;
-      });
-    });
-
-    let reviewersTotal = metrics.reproductive_reviewers ?? 0;
-
-    if (generationMode === "append") {
-      const { data: currentRow, error: currentError } = await supabase
-        .from("owner_monthly_summary_sheet")
-        .select("metrics, reviewers_total")
-        .eq("center_id", centerId)
-        .eq("year", year)
-        .eq("month", month)
-        .maybeSingle();
-
-      if (currentError) {
-        throw new Error(currentError.message);
-      }
-
-      const currentMetrics = (currentRow?.metrics ?? {}) as Record<string, unknown>;
-      DAILY_FIELDS.forEach((field) => {
-        const existing = currentMetrics[field.key];
-        const existingNum =
-          typeof existing === "number" ? existing : Number(existing) || 0;
-        metrics[field.key] += existingNum;
-      });
-
-      reviewersTotal += currentRow?.reviewers_total ?? 0;
-    }
-
-    rows.push({
-      center_id: centerId,
-      year,
-      month,
-      metrics,
-      reviewers_total: reviewersTotal,
-      created_by: actor.id,
-    });
-  }
-
-  const { error: upsertError } = await supabase
-    .from("owner_monthly_summary_sheet")
-    .upsert(rows, { onConflict: "center_id,year,month" });
-
-  if (upsertError) {
-    throw new Error(upsertError.message);
-  }
-
-  revalidatePath("/dashboard/owner-monthly");
 }

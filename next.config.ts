@@ -5,6 +5,7 @@ const nextConfig: NextConfig = {
     root: __dirname,
   },
   devIndicators: false,
+  serverExternalPackages: ["exceljs"],
 };
 
 export default nextConfig;

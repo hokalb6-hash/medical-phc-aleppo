@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { getCurrentUserProfile } from "@/lib/auth";
-import { DAILY_FIELDS } from "@/lib/constants";
+import { DAILY_FIELDS, MONTHS_AR } from "@/lib/constants";
+import { aggregateDailyEntriesByMonthForCenter } from "@/lib/owner-monthly-from-daily";
 
 function csvEscape(value: string | number | null | undefined) {
   const str = String(value ?? "");
@@ -31,6 +32,65 @@ export async function GET(request: Request) {
   const centerIdParam = searchParams.get("centerId") ?? "";
   const centerId =
     profile.role === "super_admin" ? centerIdParam : profile.center_id ?? "";
+
+  /** تجميع مركز كامل لسنة — مطابق لجدول الاستمارة الشهرية في تقارير العيادات */
+  const ownerMonthlyCenterExport =
+    searchParams.get("exportType") === "owner_monthly_center";
+
+  if (ownerMonthlyCenterExport) {
+    const centerIdResolved =
+      profile.role === "super_admin" ? (centerIdParam || "") : (profile.center_id ?? "");
+
+    if (!centerIdResolved) {
+      return NextResponse.json(
+        { error: "حدّد المركز أو سجّل الدخول كمدير مركز." },
+        { status: 400 },
+      );
+    }
+
+    if (profile.role === "center_manager" && profile.center_id !== centerIdResolved) {
+      return NextResponse.json({ error: "غير مصرح." }, { status: 403 });
+    }
+
+    if (!year) {
+      return NextResponse.json({ error: "السنة مطلوبة" }, { status: 400 });
+    }
+
+    const supabase = await createClient();
+    const { data: dailyRows, error: dailyError } = await supabase
+      .from("daily_entries")
+      .select("month, data")
+      .eq("center_id", centerIdResolved)
+      .eq("year", year);
+
+    if (dailyError) {
+      return NextResponse.json({ error: dailyError.message }, { status: 500 });
+    }
+
+    const monthMap = aggregateDailyEntriesByMonthForCenter(dailyRows ?? []);
+    const header = ["الشهر", "عدد المراجعين", ...DAILY_FIELDS.map((f) => f.label)];
+    const lines = [header.map(csvEscape).join(",")];
+
+    for (let i = 0; i < 12; i++) {
+      const m = i + 1;
+      const row = monthMap.get(m);
+      const metrics = row?.metrics ?? {};
+      const cells = [
+        MONTHS_AR[i],
+        row?.reviewers_total ?? 0,
+        ...DAILY_FIELDS.map((f) => Number(metrics[f.key]) || 0),
+      ];
+      lines.push(cells.map(csvEscape).join(","));
+    }
+
+    const csv = toExcelFriendlyCsv(lines);
+    return new NextResponse(csv, {
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="owner-monthly-center-${year}.csv"`,
+      },
+    });
+  }
 
   if (!centerId || !clinicId) {
     return NextResponse.json(

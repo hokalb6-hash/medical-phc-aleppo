@@ -1,3 +1,11 @@
+import type { AppRole } from "@/lib/supabase/types";
+
+export const ROLE_LABELS_AR: Record<AppRole, string> = {
+  super_admin: "مسؤول النظام",
+  center_manager: "مدير مركز",
+  center_user: "مستخدم مركز",
+};
+
 export const MONTHS_AR = [
   "كانون الثاني",
   "شباط",
