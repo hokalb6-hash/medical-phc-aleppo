@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import {
   ensureMonthlyReport,
@@ -8,17 +9,29 @@ import {
   ClinicReportsSourceTabs,
   type ClinicReportSource,
 } from "@/components/clinic-reports-source-tabs";
+import { ExcelDownloadLink } from "@/components/excel-download-link";
 import { ReportsSection } from "@/components/reports-section";
-import { ReportsPageChartsSlot, type SuperChartsPayload } from "@/components/reports-page-charts-slot";
+import { ReportsFilterForm } from "@/components/reports-filter-form";
+import { ReportsPageChartsSlot } from "@/components/reports-page-charts-slot";
+import { SuperAdminChartsLoader } from "@/components/super-admin-charts-loader";
 import { DAILY_FIELDS, MONTHS_AR } from "@/lib/constants";
-import { sumDailyEntryFields } from "@/lib/daily-entry-aggregate";
 import {
   aggregateDailyEntriesByMonthForCenter,
   type OwnerMonthlyAggregatedRow,
 } from "@/lib/owner-monthly-from-daily";
 import { requireAuth } from "@/lib/auth";
-import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import {
+  getCachedCentersList,
+  getCachedAllClinics,
+  getCachedClinicsByCenterSimple,
+} from "@/lib/cached-queries";
+import { fetchOwnerDailySheetRows } from "@/lib/owner-daily-data";
+import {
+  normalizeReportsFilterParams,
+  monthDateBoundsISO,
+  filterDescriptionForSource,
+} from "@/lib/reports-filter-params";
 
 type SearchParams =
   | Record<string, string | string[] | undefined>
@@ -31,15 +44,6 @@ function asSingle(value: string | string[] | undefined) {
 function parseClinicReportSource(raw: string | undefined): ClinicReportSource {
   if (raw === "owner_daily_form" || raw === "owner_monthly_form") return raw;
   return "daily_entry";
-}
-
-function monthDateRangeISO(year: number, month: number) {
-  const last = new Date(year, month, 0).getDate();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return {
-    from: `${year}-${pad(month)}-01`,
-    to: `${year}-${pad(month)}-${pad(last)}`,
-  };
 }
 
 function sumMonthlyMetrics(m: Record<string, number> | undefined) {
@@ -57,111 +61,50 @@ export default async function ReportsPage({
   const supabase = await createClient();
   const params = await Promise.resolve(searchParams);
   const now = new Date();
+  const reportSource = isClinicHub ? parseClinicReportSource(asSingle(params.source)) : "daily_entry";
 
-  const selectedMonth = Number(asSingle(params.month)) || now.getMonth() + 1;
-  const selectedYear = Number(asSingle(params.year)) || now.getFullYear();
+  const normalizedFilter = normalizeReportsFilterParams({
+    month: Number(asSingle(params.month)) || now.getMonth() + 1,
+    year: Number(asSingle(params.year)) || now.getFullYear(),
+    date: (asSingle(params.date) ?? "").toString(),
+    view: (asSingle(params.view) ?? "monthly").toString() === "daily" ? "daily" : "monthly",
+    source: reportSource,
+  });
+  const selectedMonth = normalizedFilter.month;
+  const selectedYear = normalizedFilter.year;
+  const selectedDate = normalizedFilter.date;
+  const selectedView = normalizedFilter.view;
   const flashError = asSingle(params.error);
   const flashSuccess = asSingle(params.success);
   const flashInfo = asSingle(params.info);
-  const selectedDate = (asSingle(params.date) ?? "").toString();
-  const selectedView = ((asSingle(params.view) ?? "monthly").toString() === "daily"
-    ? "daily"
-    : "monthly") as "daily" | "monthly";
   const selectedCenterId =
     (asSingle(params.centerId) ?? profile.center_id ?? "").toString();
   const clinicIdParam = (asSingle(params.clinicId) ?? "").toString();
-  const reportSource = isClinicHub ? parseClinicReportSource(asSingle(params.source)) : "daily_entry";
 
   const centersPromise =
     profile.role === "super_admin"
-      ? supabase.from("medical_centers").select("id, name").order("name")
-      : Promise.resolve({ data: [] as { id: string; name: string }[] });
+      ? getCachedCentersList()
+      : Promise.resolve([] as { id: string; name: string }[]);
 
   const clinicsPromise =
     profile.role === "super_admin"
-      ? selectedCenterId
-        ? supabase
-            .from("clinics")
-            .select("id, name, center_id")
-            .eq("center_id", selectedCenterId)
-            .order("name")
-        : supabase.from("clinics").select("id, name, center_id").order("name")
-      : supabase
-          .from("clinics")
-          .select("id, name, center_id")
-          .eq("center_id", profile.center_id)
-          .order("name");
+      ? getCachedAllClinics().then((rows) =>
+          rows.map(({ id, name, center_id }) => ({ id, name, center_id })),
+        )
+      : profile.center_id
+        ? getCachedClinicsByCenterSimple(profile.center_id)
+        : Promise.resolve([] as { id: string; name: string; center_id: string }[]);
 
   const centerMetaPromise =
     profile.role === "center_manager" && profile.center_id
       ? supabase.from("medical_centers").select("name").eq("id", profile.center_id).maybeSingle()
       : Promise.resolve({ data: null as { name: string } | null });
 
-  const [{ data: centers }, { data: clinics }, { data: centerMeta }] = await Promise.all([
+  const [centers, clinics, { data: centerMeta }] = await Promise.all([
     centersPromise,
     clinicsPromise,
     centerMetaPromise,
   ]);
-
-  let superChartsPayload: SuperChartsPayload | null = null;
-
-  if (profile.role === "super_admin") {
-    const admin = createAdminClient();
-    const { data: allYearEntries } = await admin
-      .from("daily_entries")
-      .select("center_id, month, data")
-      .eq("year", selectedYear);
-
-    const centersList = centers ?? [];
-    const entries = allYearEntries ?? [];
-
-    const centerBars = centersList
-      .map((c) => {
-        let value = 0;
-        for (const e of entries) {
-          if (e.center_id !== c.id || Number(e.month) !== selectedMonth) continue;
-          value += sumDailyEntryFields(e.data as Record<string, unknown>);
-        }
-        return { name: c.name, value };
-      })
-      .sort((a, b) => b.value - a.value);
-
-    const yearLine = MONTHS_AR.map((label, i) => {
-      const month = i + 1;
-      let value = 0;
-      for (const e of entries) {
-        if (Number(e.month) !== month) continue;
-        value += sumDailyEntryFields(e.data as Record<string, unknown>);
-      }
-      return { label, value, month };
-    });
-
-    const fieldTotals = new Map<string, number>();
-    for (const f of DAILY_FIELDS) fieldTotals.set(f.key, 0);
-    for (const e of entries) {
-      if (Number(e.month) !== selectedMonth) continue;
-      const d = (e.data ?? {}) as Record<string, unknown>;
-      for (const f of DAILY_FIELDS) {
-        fieldTotals.set(f.key, (fieldTotals.get(f.key) ?? 0) + (Number(d[f.key]) || 0));
-      }
-    }
-    const topFieldSlices = [...fieldTotals.entries()]
-      .map(([key, value]) => ({
-        name: DAILY_FIELDS.find((f) => f.key === key)?.label ?? key,
-        value,
-      }))
-      .filter((x) => x.value > 0)
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 12);
-
-    superChartsPayload = {
-      monthLabel: `${MONTHS_AR[selectedMonth - 1]} ${selectedYear}`,
-      year: selectedYear,
-      centerBars,
-      yearLine,
-      topFieldSlices,
-    };
-  }
 
   const selectedClinicId =
     profile.role === "center_manager"
@@ -181,7 +124,7 @@ export default async function ReportsPage({
 
   const isDailyEntryMode = !isClinicHub || reportSource === "daily_entry";
 
-  const { from: monthFromISO, to: monthToISO } = monthDateRangeISO(selectedYear, selectedMonth);
+  const { from: monthFromISO, to: monthToISO } = monthDateBoundsISO(selectedYear, selectedMonth);
 
   let ownerDailySheetRows: {
     entry_date: string;
@@ -191,18 +134,28 @@ export default async function ReportsPage({
 
   let ownerMonthlyAggregated: Map<number, OwnerMonthlyAggregatedRow> | null = null;
 
-  if (isClinicHub && profile.center_id) {
-    if (reportSource === "owner_daily_form" && selectedClinicId) {
-      const { data: odRows } = await supabase
-        .from("owner_daily_clinic_sheet")
-        .select("entry_date, doctor_name, patient_count")
-        .eq("center_id", profile.center_id)
-        .eq("clinic_id", selectedClinicId)
-        .gte("entry_date", monthFromISO)
-        .lte("entry_date", monthToISO)
-        .order("entry_date");
-      ownerDailySheetRows = odRows ?? [];
+  if (reportSource === "owner_daily_form" && selectedClinicId && resolvedCenterId) {
+    try {
+      const rows = await fetchOwnerDailySheetRows({
+        centerId: resolvedCenterId,
+        clinicId: selectedClinicId,
+        year: selectedYear,
+        month: selectedMonth,
+      });
+      ownerDailySheetRows = rows.map((r) => ({
+        entry_date: r.entry_date,
+        doctor_name: r.doctor_name,
+        patient_count: r.patient_count,
+      }));
+      if (selectedView === "daily" && selectedDate) {
+        ownerDailySheetRows = ownerDailySheetRows.filter((r) => r.entry_date === selectedDate);
+      }
+    } catch {
+      ownerDailySheetRows = [];
     }
+  }
+
+  if (isClinicHub && profile.center_id) {
     if (reportSource === "owner_monthly_form") {
       const { data: centerYearRows } = await supabase
         .from("daily_entries")
@@ -332,8 +285,19 @@ export default async function ReportsPage({
     q.set("month", String(selectedMonth));
     q.set("year", String(selectedYear));
     if (selectedClinicId) q.set("clinicId", selectedClinicId);
+
+    if (source === "owner_monthly_form") {
+      q.set("view", "monthly");
+      return `/dashboard/reports?${q.toString()}`;
+    }
+
+    if (source === "owner_daily_form") {
+      q.set("view", "monthly");
+      return `/dashboard/reports?${q.toString()}`;
+    }
+
     q.set("view", selectedView);
-    if (selectedDate) q.set("date", selectedDate);
+    if (selectedView === "daily" && selectedDate) q.set("date", selectedDate);
     return `/dashboard/reports?${q.toString()}`;
   }
 
@@ -371,7 +335,7 @@ export default async function ReportsPage({
         </div>
       ) : null}
       {flashSuccess ? (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+        <div className="rounded-xl border border-sy-green-200 bg-sy-green-50 px-4 py-3 text-sm text-sy-green-800">
           {flashSuccess}
         </div>
       ) : null}
@@ -384,14 +348,14 @@ export default async function ReportsPage({
       {isClinicHub ? <ClinicReportsSourceTabs active={reportSource} tabs={clinicSourceTabs} /> : null}
 
       {isClinicHub ? (
-        <header className="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-gradient-to-bl from-white via-slate-50/90 to-blue-50/50 px-5 py-6 shadow-sm md:px-8 md:py-8">
+        <header className="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-gradient-to-bl from-white via-slate-50/90 to-sy-green-50/50 px-5 py-6 shadow-sm md:px-8 md:py-8">
           <div
-            className="pointer-events-none absolute -left-20 -top-24 h-56 w-56 rounded-full bg-blue-600/[0.06]"
+            className="pointer-events-none absolute -left-20 -top-24 h-56 w-56 rounded-full bg-sy-green-600/[0.06]"
             aria-hidden
           />
           <div className="relative flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
             <div className="min-w-0 max-w-3xl">
-              <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-blue-700/90">
+              <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-sy-green-700/90">
                 لوحة التقارير
               </p>
               <h2 className="mt-1.5 text-2xl font-bold tracking-tight text-slate-900 md:text-3xl">
@@ -417,7 +381,7 @@ export default async function ReportsPage({
               </p>
             </div>
             {centerMeta?.name ? (
-              <div className="shrink-0 rounded-xl border border-blue-100/90 bg-white/95 px-5 py-3 text-right shadow-sm ring-1 ring-slate-100">
+              <div className="shrink-0 rounded-xl border border-sy-green-100/90 bg-white/95 px-5 py-3 text-right shadow-sm ring-1 ring-slate-100">
                 <p className="text-xs font-medium text-slate-500">اسم المركز</p>
                 <p className="mt-0.5 text-sm font-semibold text-slate-900">{centerMeta.name}</p>
               </div>
@@ -435,11 +399,11 @@ export default async function ReportsPage({
                   </div>
                   <div className="rounded-xl bg-white/80 px-4 py-3 ring-1 ring-slate-100">
                     <dt className="text-xs font-medium text-slate-500">مجموع مؤشرات الشهر (يومي)</dt>
-                    <dd className="mt-1 text-lg font-bold tabular-nums text-blue-800">{kpiDailyMonthTotal}</dd>
+                    <dd className="mt-1 text-lg font-bold tabular-nums text-sy-green-800">{kpiDailyMonthTotal}</dd>
                   </div>
                   <div className="rounded-xl bg-white/80 px-4 py-3 ring-1 ring-slate-100">
                     <dt className="text-xs font-medium text-slate-500">أيام مسجّلة في التقرير الرسمي</dt>
-                    <dd className="mt-1 text-lg font-bold tabular-nums text-emerald-800">{kpiReportDaysCount}</dd>
+                    <dd className="mt-1 text-lg font-bold tabular-nums text-sy-green-800">{kpiReportDaysCount}</dd>
                   </div>
                 </>
               ) : reportSource === "owner_daily_form" ? (
@@ -452,11 +416,13 @@ export default async function ReportsPage({
                   </div>
                   <div className="rounded-xl bg-white/80 px-4 py-3 ring-1 ring-slate-100">
                     <dt className="text-xs font-medium text-slate-500">إجمالي العدد (الاستمارة اليومية)</dt>
-                    <dd className="mt-1 text-lg font-bold tabular-nums text-blue-800">{kpiOwnerDailyPatients}</dd>
+                    <dd className="mt-1 text-lg font-bold tabular-nums text-sy-green-800">{kpiOwnerDailyPatients}</dd>
                   </div>
                   <div className="rounded-xl bg-white/80 px-4 py-3 ring-1 ring-slate-100">
-                    <dt className="text-xs font-medium text-slate-500">صفوف محفوظة في الشهر</dt>
-                    <dd className="mt-1 text-lg font-bold tabular-nums text-emerald-800">{kpiOwnerDailyRowCount}</dd>
+                    <dt className="text-xs font-medium text-slate-500">
+                      {selectedView === "daily" && selectedDate ? "صفوف اليوم المحدد" : "صفوف محفوظة في الشهر"}
+                    </dt>
+                    <dd className="mt-1 text-lg font-bold tabular-nums text-sy-green-800">{kpiOwnerDailyRowCount}</dd>
                   </div>
                 </>
               ) : (
@@ -469,13 +435,13 @@ export default async function ReportsPage({
                     <dt className="text-xs font-medium text-slate-500">
                       مجموع مؤشرات الشهر المحدد ({MONTHS_AR[selectedMonth - 1]})
                     </dt>
-                    <dd className="mt-1 text-lg font-bold tabular-nums text-blue-800">
+                    <dd className="mt-1 text-lg font-bold tabular-nums text-sy-green-800">
                       {ownerMonthlySelectedMonthTotal}
                     </dd>
                   </div>
                   <div className="rounded-xl bg-white/80 px-4 py-3 ring-1 ring-slate-100">
                     <dt className="text-xs font-medium text-slate-500">مجموع السنة (جميع الشهور)</dt>
-                    <dd className="mt-1 text-lg font-bold tabular-nums text-emerald-800">{ownerMonthlyYearTotal}</dd>
+                    <dd className="mt-1 text-lg font-bold tabular-nums text-sy-green-800">{ownerMonthlyYearTotal}</dd>
                   </div>
                 </>
               )}
@@ -515,89 +481,36 @@ export default async function ReportsPage({
         title="الفلاتر والفترة"
         description={
           isClinicHub
-            ? "حدّد العيادة ونوع العرض (شهري / يومي) والشهر والسنة. حقل التاريخ يفعّل التصدير اليومي والعرض المفلتر."
-            : "اختر المركز (إن وُجدت صلاحية)، ثم العيادة والفترة لعرض البيانات والتصدير."
+            ? filterDescriptionForSource(reportSource)
+            : "اختر المركز والعيادة، ثم حدّد الفترة. العرض اليومي يتطلب تاريخاً محدداً للعرض والتصدير."
         }
       >
-        <form className="surface-card grid gap-4 p-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 xl:items-end">
-          {profile.role === "super_admin" ? (
-            <label className="flex min-w-0 flex-col gap-1.5 text-sm">
-              <span className="font-medium text-slate-700">المركز</span>
-              <select name="centerId" defaultValue={selectedCenterId} className="field-select">
-                <option value="">كل المراكز</option>
-                {(centers ?? []).map((center) => (
-                  <option key={center.id} value={center.id}>
-                    {center.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-
-          <label className="flex min-w-0 flex-col gap-1.5 text-sm">
-            <span className="font-medium text-slate-700">العيادة</span>
-            <select name="clinicId" defaultValue={selectedClinicId} className="field-select">
-              <option value="">اختر العيادة</option>
-              {(clinics ?? []).map((clinic) => (
-                <option key={clinic.id} value={clinic.id}>
-                  {clinic.name}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="flex min-w-0 flex-col gap-1.5 text-sm">
-            <span className="font-medium text-slate-700">نوع العرض</span>
-            <select name="view" defaultValue={selectedView} className="field-select">
-              <option value="monthly">عرض شهري</option>
-              <option value="daily">عرض يومي</option>
-            </select>
-          </label>
-
-          <label className="flex min-w-0 flex-col gap-1.5 text-sm">
-            <span className="font-medium text-slate-700">الشهر</span>
-            <select name="month" defaultValue={String(selectedMonth)} className="field-select">
-              {MONTHS_AR.map((month, index) => (
-                <option key={month} value={index + 1}>
-                  {month}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="flex min-w-0 flex-col gap-1.5 text-sm">
-            <span className="font-medium text-slate-700">السنة</span>
-            <input
-              name="year"
-              type="number"
-              min={2000}
-              max={2100}
-              defaultValue={selectedYear}
-              className="field-input"
-            />
-          </label>
-
-          <label className="flex min-w-0 flex-col gap-1.5 text-sm">
-            <span className="font-medium text-slate-700">تاريخ محدد (اختياري)</span>
-            <input name="date" type="date" defaultValue={selectedDate} className="field-input" />
-            <span className="text-xs text-slate-500">للعرض اليومي وتصدير يوم واحد.</span>
-          </label>
-
-          {isClinicHub ? <input type="hidden" name="source" value={reportSource} /> : null}
-
-          <div className="flex items-end xl:col-span-1">
-            <button type="submit" className="btn-dark w-full sm:w-auto">
-              تطبيق الفلاتر
-            </button>
-          </div>
-        </form>
+        <ReportsFilterForm
+          role={profile.role}
+          centers={centers ?? []}
+          clinics={clinics ?? []}
+          values={{
+            centerId: selectedCenterId,
+            clinicId: selectedClinicId,
+            view: selectedView,
+            month: selectedMonth,
+            year: selectedYear,
+            date: selectedDate,
+            source: reportSource,
+          }}
+          showSourceField={isClinicHub}
+        />
       </ReportsSection>
 
       {isClinicHub && reportSource === "owner_daily_form" ? (
         <ReportsSection
           step="2"
           title="الاستمارة اليومية — بيانات محفوظة"
-          description={`عرض السجلات الفعلية من جدول الاستمارة اليومية للعيادة والشهر ${MONTHS_AR[selectedMonth - 1]} ${selectedYear} (من ${monthFromISO} إلى ${monthToISO}).`}
+          description={
+            selectedView === "daily" && selectedDate
+              ? `عرض يوم ${selectedDate} — الاستمارة اليومية للعيادة المحددة.`
+              : `عرض السجلات الفعلية من جدول الاستمارة اليومية للعيادة والشهر ${MONTHS_AR[selectedMonth - 1]} ${selectedYear} (من ${monthFromISO} إلى ${monthToISO}).`
+          }
         >
           {!selectedClinicId ? (
             <p className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
@@ -605,10 +518,27 @@ export default async function ReportsPage({
             </p>
           ) : ownerDailySheetRows.length === 0 ? (
             <p className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
-              لا توجد صفوف محفوظة لهذه العيادة في هذا الشهر. يمكن الإدخال من صفحة الاستمارة اليومية لأصحاب المراكز.
+              {selectedView === "daily" && selectedDate
+                ? `لا توجد صفوف محفوظة في ${selectedDate} لهذه العيادة.`
+                : "لا توجد صفوف محفوظة لهذه العيادة في هذا الشهر. يمكن الإدخال من صفحة الاستمارة اليومية لأصحاب المراكز."}
             </p>
           ) : (
-            <div className="table-shell shadow-sm">
+            <div className="space-y-3">
+              <div className="surface-card flex flex-col gap-2 border border-sy-green-100 bg-gradient-to-br from-sy-green-50/60 to-white p-4 ring-1 ring-sy-green-100/70 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <h4 className="text-sm font-semibold text-slate-900">تصدير الاستمارة اليومية</h4>
+                  <p className="mt-0.5 text-xs leading-relaxed text-slate-600">
+                    ملف CSV للعيادة والشهر المحددين (UTF-8 مع BOM لعرض العربية في Excel).
+                  </p>
+                </div>
+                <a
+                  href={`/dashboard/reports/export?exportType=owner_daily_clinic&centerId=${encodeURIComponent(resolvedCenterId)}&clinicId=${encodeURIComponent(selectedClinicId)}&month=${selectedMonth}&year=${selectedYear}`}
+                  className="btn-emerald shrink-0 text-sm font-medium"
+                >
+                  تنزيل الاستمارة اليومية (CSV)
+                </a>
+              </div>
+              <div className="table-shell shadow-sm">
               <table className="min-w-full text-right text-sm">
                 <thead className="sticky top-0 z-10 bg-slate-100 shadow-sm">
                   <tr>
@@ -630,11 +560,12 @@ export default async function ReportsPage({
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           )}
           <p className="text-sm leading-relaxed text-slate-600">
             للتعديل أو الإضافة:{" "}
-            <Link href="/dashboard/owner-daily" className="font-medium text-blue-800 underline">
+            <Link href="/dashboard/owner-daily" className="font-medium text-sy-green-800 underline">
               الاستمارة اليومية لأصحاب المراكز
             </Link>
             .
@@ -652,7 +583,7 @@ export default async function ReportsPage({
             </p>
           ) : (
             <div className="space-y-3">
-              <div className="surface-card flex flex-col gap-2 border border-emerald-100 bg-gradient-to-br from-emerald-50/60 to-white p-4 ring-1 ring-emerald-100/70 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+              <div className="surface-card flex flex-col gap-2 border border-sy-green-100 bg-gradient-to-br from-sy-green-50/60 to-white p-4 ring-1 ring-sy-green-100/70 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
                 <div className="min-w-0">
                   <h4 className="text-sm font-semibold text-slate-900">تصدير الاستمارة</h4>
                   <p className="mt-0.5 text-xs leading-relaxed text-slate-600">
@@ -724,7 +655,7 @@ export default async function ReportsPage({
       >
         <div className="space-y-4">
           {profile.role === "super_admin" ? (
-            <div className="surface-card space-y-3 border border-blue-200 bg-gradient-to-br from-blue-50/90 to-slate-50 p-4 md:p-5">
+            <div className="surface-card space-y-3 border border-sy-green-200 bg-gradient-to-br from-sy-green-50/90 to-slate-50 p-4 md:p-5">
               <h4 className="text-sm font-semibold text-slate-900">تقرير المشرف العام — جميع المراكز</h4>
               <p className="text-sm leading-relaxed text-slate-700">
                 ملف{" "}
@@ -732,12 +663,12 @@ export default async function ReportsPage({
                 مركز مع أشهر السنة والمجموع ومؤشرات الإدخال اليومي المجمّعة.
               </p>
               <div className="flex flex-wrap items-center gap-2">
-                <a
+                <ExcelDownloadLink
                   href={`/dashboard/reports/export-super-workbook?year=${selectedYear}`}
                   className="btn-primary text-sm font-medium"
                 >
                   تنزيل Excel — ورقة لكل مركز ({selectedYear})
-                </a>
+                </ExcelDownloadLink>
                 <span className="text-xs text-slate-600">حسب السنة في الفلاتر.</span>
               </div>
             </div>
@@ -745,7 +676,7 @@ export default async function ReportsPage({
 
           {selectedClinicId && resolvedCenterId ? (
             profile.role === "center_manager" ? (
-              <div className="surface-card space-y-3 border border-emerald-100 bg-gradient-to-br from-emerald-50/50 to-white p-4 md:p-5 ring-1 ring-emerald-100/80">
+              <div className="surface-card space-y-3 border border-sy-green-100 bg-gradient-to-br from-sy-green-50/50 to-white p-4 md:p-5 ring-1 ring-sy-green-100/80">
                 <h4 className="text-sm font-semibold text-slate-900">تصدير عيادة محددة</h4>
                 <p className="text-sm leading-relaxed text-slate-600">
                   UTF-8 مع ترتيب مناسب للعربية في Excel. التقرير الشهري: صفوف التقرير الرسمي. التصدير اليومي:
@@ -815,11 +746,21 @@ export default async function ReportsPage({
               : "اختر عيادةً لعرض مخططات العيادة."
           }
         >
+          {profile.role === "super_admin" && selectedView === "monthly" ? (
+            <Suspense
+              key={`super-charts-${selectedYear}-${selectedMonth}`}
+              fallback={
+                <div className="surface-card flex min-h-[200px] animate-pulse items-center justify-center p-6 text-sm text-slate-500">
+                  جاري تحميل مخططات المشرف العام...
+                </div>
+              }
+            >
+              <SuperAdminChartsLoader year={selectedYear} month={selectedMonth} />
+            </Suspense>
+          ) : null}
           <ReportsPageChartsSlot
-            showSuper={
-              profile.role === "super_admin" && selectedView === "monthly" && superChartsPayload != null
-            }
-            superCharts={superChartsPayload}
+            showSuper={false}
+            superCharts={null}
             showClinic={selectedView === "monthly" && Boolean(selectedClinicId)}
             clinicCharts={
               selectedView === "monthly" && selectedClinicId

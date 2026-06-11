@@ -40,7 +40,7 @@ export async function loginAction(
   const admin = createAdminClient();
   const { data: profile, error: profileError } = await admin
     .from("profiles")
-    .select("id")
+    .select("id, role")
     .eq("id", user.id)
     .maybeSingle();
 
@@ -57,6 +57,10 @@ export async function loginAction(
       error:
         "الحساب موجود في Auth لكنه غير مرتبط بجدول profiles بنفس UUID. تأكد من تطابق auth.users.id مع profiles.id.",
     };
+  }
+
+  if (profile.role === "super_admin") {
+    redirect("/dashboard?welcome=1");
   }
 
   redirect("/dashboard");

@@ -114,7 +114,7 @@ export default function SuperAdminDailyMonitor({ entries }: Props) {
                   <button
                     type="button"
                     onClick={() => setActiveId(entry.id)}
-                    className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                    className="rounded-xl border border-sy-green-200 bg-sy-green-50 px-3 py-1.5 text-xs font-semibold text-sy-green-700 hover:bg-sy-green-100"
                   >
                     عرض التفاصيل
                   </button>

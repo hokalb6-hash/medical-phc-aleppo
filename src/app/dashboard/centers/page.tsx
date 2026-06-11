@@ -1,6 +1,7 @@
 import { requireAuth } from "@/lib/auth";
-import { createCenterWithManager } from "@/app/dashboard/actions";
-import { createClient } from "@/lib/supabase/server";
+import { createCenterWithManager, deleteCenter } from "@/app/dashboard/actions";
+import { getCachedCentersFull } from "@/lib/cached-queries";
+import { DeleteConfirmForm } from "@/components/delete-confirm-form";
 
 type SearchParams =
   | Record<string, string | string[] | undefined>
@@ -16,15 +17,11 @@ export default async function CentersPage({
   searchParams: SearchParams;
 }) {
   const profile = await requireAuth();
-  const supabase = await createClient();
   const params = await Promise.resolve(searchParams);
   const error = asSingle(params.error);
   const success = asSingle(params.success);
 
-  const { data: centers } = await supabase
-    .from("medical_centers")
-    .select("id, name, address, phone, email, created_at")
-    .order("created_at", { ascending: false });
+  const centers = await getCachedCentersFull();
 
   return (
     <div className="space-y-6">
@@ -36,7 +33,7 @@ export default async function CentersPage({
         </div>
       ) : null}
       {success ? (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+        <div className="rounded-xl border border-sy-green-200 bg-sy-green-50 px-4 py-3 text-sm text-sy-green-700">
           {success}
         </div>
       ) : null}
@@ -67,6 +64,9 @@ export default async function CentersPage({
               <th className="px-3 py-2">العنوان</th>
               <th className="px-3 py-2">الهاتف</th>
               <th className="px-3 py-2">البريد</th>
+              {profile.role === "super_admin" ? (
+                <th className="px-3 py-2">إجراءات</th>
+              ) : null}
             </tr>
           </thead>
           <tbody>
@@ -76,6 +76,19 @@ export default async function CentersPage({
                 <td className="px-3 py-2">{center.address ?? "-"}</td>
                 <td className="px-3 py-2">{center.phone ?? "-"}</td>
                 <td className="px-3 py-2">{center.email ?? "-"}</td>
+                {profile.role === "super_admin" ? (
+                  <td className="px-3 py-2">
+                    <DeleteConfirmForm
+                      action={deleteCenter}
+                      idFieldName="centerId"
+                      entityId={center.id}
+                      entityName={center.name}
+                      confirmMessage={
+                        "هل أنت متأكد من حذف المركز «{name}»؟\n\nسيتم حذف جميع العيادات والإدخالات اليومية والتقارير المرتبطة به. هذا الإجراء نهائي."
+                      }
+                    />
+                  </td>
+                ) : null}
               </tr>
             ))}
           </tbody>

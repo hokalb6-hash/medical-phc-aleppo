@@ -7,7 +7,29 @@ import { requireAuth } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { DAILY_FIELDS } from "@/lib/constants";
+import {
+  normalizeEntityName,
+  parseCsvRows,
+  parseEntryDateParts,
+  parseMonthValue,
+  resolveClinicIdForImportRow,
+  resolveDailyEntryCsvColumns,
+} from "@/lib/daily-entry-csv";
 import { sumDailyEntryFields } from "@/lib/daily-entry-aggregate";
+import { clinicHasProtectedData } from "@/lib/clinic-data-guard";
+import {
+  normalizeEntityName as normalizeOwnerEntityName,
+  parseEntryDateParts as parseOwnerEntryDateParts,
+  resolveClinicIdForOwnerDailyRow,
+  resolveOwnerDailyCsvColumns,
+} from "@/lib/owner-daily-csv";
+import {
+  invalidateCentersCache,
+  invalidateClinicsCache,
+  invalidateDailyDataCaches,
+  invalidateDailyMonitorCache,
+  invalidateSuperChartsCache,
+} from "@/lib/cache-invalidation";
 
 const createCenterSchema = z.object({
   centerName: z.string().min(3, "اسم المركز مطلوب"),
@@ -18,52 +40,6 @@ const createCenterSchema = z.object({
   managerEmail: z.string().email("بريد المدير غير صحيح"),
   managerPassword: z.string().min(8, "كلمة المرور يجب أن تكون 8 أحرف على الأقل"),
 });
-
-function parseCsvRows(content: string): string[][] {
-  const rows: string[][] = [];
-  let current = "";
-  let row: string[] = [];
-  let inQuotes = false;
-
-  for (let i = 0; i < content.length; i += 1) {
-    const char = content[i];
-    const next = content[i + 1];
-
-    if (char === '"') {
-      if (inQuotes && next === '"') {
-        current += '"';
-        i += 1;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      continue;
-    }
-
-    if (char === "," && !inQuotes) {
-      row.push(current.trim());
-      current = "";
-      continue;
-    }
-
-    if ((char === "\n" || char === "\r") && !inQuotes) {
-      if (char === "\r" && next === "\n") i += 1;
-      row.push(current.trim());
-      current = "";
-      if (row.some((cell) => cell !== "")) rows.push(row);
-      row = [];
-      continue;
-    }
-
-    current += char;
-  }
-
-  if (current.length > 0 || row.length > 0) {
-    row.push(current.trim());
-    if (row.some((cell) => cell !== "")) rows.push(row);
-  }
-
-  return rows;
-}
 
 export async function createCenterWithManager(formData: FormData) {
   const actor = await requireAuth();
@@ -135,10 +111,127 @@ export async function createCenterWithManager(formData: FormData) {
 
   revalidatePath("/dashboard");
   revalidatePath("/dashboard/centers");
+  invalidateCentersCache();
   revalidateTag("dashboard-counts-all", "max");
   redirect(
     `/dashboard/centers?success=${encodeURIComponent(
       "تم إنشاء المركز والمدير بنجاح",
+    )}`,
+  );
+}
+
+const entityIdSchema = z.string().uuid("المعرّف غير صالح");
+
+export async function deleteCenter(formData: FormData) {
+  const actor = await requireAuth();
+  if (actor.role !== "super_admin") {
+    redirect(`/dashboard/centers?error=${encodeURIComponent("غير مصرح")}`);
+  }
+
+  const parsed = entityIdSchema.safeParse(String(formData.get("centerId") ?? "").trim());
+  if (!parsed.success) {
+    redirect(`/dashboard/centers?error=${encodeURIComponent("معرّف المركز غير صالح")}`);
+  }
+  const centerId = parsed.data;
+
+  const admin = createAdminClient();
+  const { data: center } = await admin
+    .from("medical_centers")
+    .select("id, name")
+    .eq("id", centerId)
+    .maybeSingle();
+
+  if (!center) {
+    redirect(`/dashboard/centers?error=${encodeURIComponent("المركز غير موجود")}`);
+  }
+
+  const { error } = await admin.from("medical_centers").delete().eq("id", centerId);
+  if (error) {
+    redirect(`/dashboard/centers?error=${encodeURIComponent(error.message)}`);
+  }
+
+  revalidatePath("/dashboard");
+  revalidatePath("/dashboard/centers");
+  revalidatePath("/dashboard/clinics");
+  revalidatePath("/dashboard/daily-entry");
+  revalidatePath("/dashboard/reports");
+  revalidatePath("/dashboard/owner-daily");
+  revalidatePath("/dashboard/owner-monthly");
+  invalidateCentersCache();
+  invalidateClinicsCache(centerId);
+  invalidateDailyMonitorCache();
+  revalidateTag("dashboard-counts-all", "max");
+  revalidateTag(`dashboard-counts-${centerId}`, "max");
+  revalidateTag("owner-daily-clinics", "max");
+  revalidateTag(`owner-daily-clinics-${centerId}`, "max");
+  redirect(
+    `/dashboard/centers?success=${encodeURIComponent(
+      `تم حذف المركز «${center.name}» وجميع العيادات والبيانات المرتبطة به`,
+    )}`,
+  );
+}
+
+export async function deleteClinic(formData: FormData) {
+  const actor = await requireAuth();
+  if (actor.role === "center_user") {
+    redirect(`/dashboard/clinics?error=${encodeURIComponent("غير مصرح")}`);
+  }
+  if (actor.role !== "super_admin" && actor.role !== "center_manager") {
+    redirect(`/dashboard/clinics?error=${encodeURIComponent("غير مصرح")}`);
+  }
+
+  const parsed = entityIdSchema.safeParse(String(formData.get("clinicId") ?? "").trim());
+  if (!parsed.success) {
+    redirect(`/dashboard/clinics?error=${encodeURIComponent("معرّف العيادة غير صالح")}`);
+  }
+  const clinicId = parsed.data;
+
+  const admin = createAdminClient();
+  const { data: clinic } = await admin
+    .from("clinics")
+    .select("id, name, center_id")
+    .eq("id", clinicId)
+    .maybeSingle();
+
+  if (!clinic) {
+    redirect(`/dashboard/clinics?error=${encodeURIComponent("العيادة غير موجودة")}`);
+  }
+
+  if (
+    actor.role === "center_manager" &&
+    (!actor.center_id || clinic.center_id !== actor.center_id)
+  ) {
+    redirect(
+      `/dashboard/clinics?error=${encodeURIComponent("غير مصرح لحذف عيادة خارج مركزك")}`,
+    );
+  }
+
+  if (actor.role === "center_manager" && (await clinicHasProtectedData(clinicId))) {
+    redirect(
+      `/dashboard/clinics?error=${encodeURIComponent(
+        `لا يمكن حذف العيادة «${clinic.name}» لأنها تحتوي على بيانات محفوظة (إدخال يومي، استمارات، أو تقارير). احذف البيانات أولاً أو تواصل مع مسؤول النظام.`,
+      )}`,
+    );
+  }
+
+  const { error } = await admin.from("clinics").delete().eq("id", clinicId);
+  if (error) {
+    redirect(`/dashboard/clinics?error=${encodeURIComponent(error.message)}`);
+  }
+
+  revalidatePath("/dashboard/clinics");
+  revalidatePath("/dashboard/daily-entry");
+  revalidatePath("/dashboard/reports");
+  revalidatePath("/dashboard/owner-daily");
+  invalidateClinicsCache(clinic.center_id);
+  invalidateDailyMonitorCache();
+  revalidateTag("dashboard-counts-all", "max");
+  revalidateTag(`dashboard-counts-${clinic.center_id}`, "max");
+  revalidateTag("owner-daily-clinics", "max");
+  revalidateTag(`owner-daily-clinics-${clinic.center_id}`, "max");
+  redirect(
+    `/dashboard/clinics?success=${encodeURIComponent(
+      `تم حذف العيادة «${clinic.name}» وجميع بياناتها المرتبطة`,
     )}`,
   );
 }
@@ -187,6 +280,7 @@ export async function createClinic(formData: FormData) {
   }
 
   revalidatePath("/dashboard/clinics");
+  invalidateClinicsCache(centerId);
   revalidateTag("dashboard-counts-all", "max");
   revalidateTag(`dashboard-counts-${centerId}`, "max");
   revalidateTag("owner-daily-clinics", "max");
@@ -260,8 +354,7 @@ export async function saveDailyEntry(formData: FormData) {
 
   revalidatePath("/dashboard/daily-entry");
   revalidatePath("/dashboard/reports");
-  revalidateTag("dashboard-counts-all", "max");
-  revalidateTag(`dashboard-counts-${centerId}`, "max");
+  invalidateDailyDataCaches(centerId, year, month);
   redirect(
     `/dashboard/daily-entry?${resultParams.toString()}&success=${encodeURIComponent("تم حفظ البيانات ويمكنك تعديلها مباشرة")}`,
   );
@@ -298,37 +391,38 @@ export async function importDailyEntryCsv(formData: FormData) {
     );
   }
 
-  const headers = rows[0].map((h) => h.trim().toLowerCase());
-  const getIndex = (name: string) => headers.indexOf(name.toLowerCase());
+  const columnMap = resolveDailyEntryCsvColumns(rows[0]);
+  const { dateIdx, clinicIdIdx, centerNameIdx, monthIdx, yearIdx, fieldIndexes } =
+    columnMap;
 
-  const dateIdx = getIndex("entry_date");
-  const clinicIdIdx = getIndex("clinic_id");
-  const clinicNameIdx = getIndex("clinic_name");
-  const monthIdx = getIndex("month");
-  const yearIdx = getIndex("year");
-
-  if (dateIdx < 0 || (clinicIdIdx < 0 && clinicNameIdx < 0)) {
+  if (dateIdx < 0) {
     redirect(
       `/dashboard/daily-entry?error=${encodeURIComponent(
-        "الأعمدة المطلوبة: entry_date و clinic_id أو clinic_name",
+        "العمود المطلوب: التاريخ. استخدم قالب CSV من الصفحة دون تغيير أسماء الأعمدة.",
       )}`,
     );
   }
 
   const supabase = await createClient();
-  const { data: clinics } = await supabase
-    .from("clinics")
-    .select("id, name")
-    .eq("center_id", centerId);
+  const [{ data: clinics }, { data: center }] = await Promise.all([
+    supabase.from("clinics").select("id, name").eq("center_id", centerId).order("name"),
+    supabase.from("medical_centers").select("name").eq("id", centerId).maybeSingle(),
+  ]);
 
+  const defaultClinicId = (clinics ?? [])[0]?.id ?? "";
+  const centerNameNormalized = normalizeEntityName(center?.name ?? "");
+  const allowCenterFallback = Boolean(actor.center_id);
   const clinicByName = new Map<string, string>(
-    (clinics ?? []).map((c) => [c.name.trim().toLowerCase(), c.id]),
+    (clinics ?? []).map((c) => [normalizeEntityName(c.name), c.id]),
   );
 
-  const fieldIndexes = DAILY_FIELDS.map((field) => ({
-    key: field.key,
-    index: getIndex(field.key),
-  }));
+  if (!defaultClinicId) {
+    redirect(
+      `/dashboard/daily-entry?error=${encodeURIComponent(
+        "لا توجد عيادة مرتبطة بالمركز. أنشئ عيادة واحدة على الأقل ثم أعد الاستيراد.",
+      )}`,
+    );
+  }
 
   const upsertRows: {
     center_id: string;
@@ -341,32 +435,43 @@ export async function importDailyEntryCsv(formData: FormData) {
   }[] = [];
 
   let skipped = 0;
+  let skippedDate = 0;
+  let skippedClinic = 0;
   for (let i = 1; i < rows.length; i += 1) {
     const row = rows[i];
-    const entryDate = row[dateIdx];
-    if (!entryDate) {
+    const rawDate = row[dateIdx];
+    if (!rawDate) {
       skipped += 1;
+      skippedDate += 1;
       continue;
     }
 
-    let clinicId = clinicIdIdx >= 0 ? row[clinicIdIdx] : "";
-    if (!clinicId && clinicNameIdx >= 0) {
-      clinicId =
-        clinicByName.get((row[clinicNameIdx] ?? "").trim().toLowerCase()) ?? "";
-    }
+    const clinicId = resolveClinicIdForImportRow({
+      rowName: centerNameIdx >= 0 ? (row[centerNameIdx] ?? "") : "",
+      clinicIdFromColumn: clinicIdIdx >= 0 ? row[clinicIdIdx] : "",
+      clinicByName,
+      centerNameNormalized,
+      defaultClinicId,
+      allowCenterFallback,
+    });
     if (!clinicId) {
       skipped += 1;
+      skippedClinic += 1;
       continue;
     }
 
-    const dateObj = new Date(entryDate);
-    if (Number.isNaN(dateObj.getTime())) {
+    const dateParts = parseEntryDateParts(rawDate);
+    if (!dateParts) {
       skipped += 1;
+      skippedDate += 1;
       continue;
     }
 
-    const month = monthIdx >= 0 ? Number(row[monthIdx]) || dateObj.getMonth() + 1 : dateObj.getMonth() + 1;
-    const year = yearIdx >= 0 ? Number(row[yearIdx]) || dateObj.getFullYear() : dateObj.getFullYear();
+    const month =
+      monthIdx >= 0
+        ? parseMonthValue(row[monthIdx], dateParts.month)
+        : dateParts.month;
+    const year = yearIdx >= 0 ? Number(row[yearIdx]) || dateParts.year : dateParts.year;
 
     const data: Record<string, number> = {};
     fieldIndexes.forEach(({ key, index }) => {
@@ -376,7 +481,7 @@ export async function importDailyEntryCsv(formData: FormData) {
     upsertRows.push({
       center_id: centerId,
       clinic_id: clinicId,
-      entry_date: entryDate,
+      entry_date: dateParts.iso,
       month,
       year,
       data,
@@ -385,8 +490,18 @@ export async function importDailyEntryCsv(formData: FormData) {
   }
 
   if (upsertRows.length === 0) {
+    const details = [
+      skippedDate > 0 ? `${skippedDate} بتاريخ غير صالح (استخدم YYYY-MM-DD أو DD/MM/YYYY)` : "",
+      skippedClinic > 0 ? `${skippedClinic} باسم مركز غير مطابق` : "",
+    ]
+      .filter(Boolean)
+      .join("، ");
     redirect(
-      `/dashboard/daily-entry?error=${encodeURIComponent("لم يتم استيراد أي صف. تحقق من تنسيق الملف")}`,
+      `/dashboard/daily-entry?error=${encodeURIComponent(
+        details
+          ? `لم يتم استيراد أي صف: ${details}. حمّل القالب من الصفحة واملأ صفاً واحداً لكل يوم.`
+          : "لم يتم استيراد أي صف. تحقق من تنسيق الملف أو حمّل القالب من الصفحة.",
+      )}`,
     );
   }
 
@@ -400,6 +515,10 @@ export async function importDailyEntryCsv(formData: FormData) {
 
   revalidatePath("/dashboard/daily-entry");
   revalidatePath("/dashboard/reports");
+  invalidateDailyMonitorCache();
+  for (const y of new Set(upsertRows.map((row) => row.year))) {
+    invalidateSuperChartsCache(y);
+  }
   revalidateTag("dashboard-counts-all", "max");
   revalidateTag(`dashboard-counts-${centerId}`, "max");
 
@@ -612,14 +731,10 @@ export async function saveOwnerDailyClinicSheet(formData: FormData) {
   const centerId = actor.center_id;
   const month = Number(formData.get("month")) || new Date().getMonth() + 1;
   const year = Number(formData.get("year")) || new Date().getFullYear();
-  const clinicId = String(formData.get("clinicId") ?? "");
   const resultParams = new URLSearchParams({
     month: String(month),
     year: String(year),
   });
-  if (clinicId) {
-    resultParams.set("clinicId", clinicId);
-  }
 
   const rows: {
     center_id: string;
@@ -631,21 +746,22 @@ export async function saveOwnerDailyClinicSheet(formData: FormData) {
   }[] = [];
 
   formData.forEach((value, key) => {
-    if (!key.startsWith("od_")) return;
-    if (!key.endsWith("_count")) return;
+    if (!key.startsWith("od_") || !key.endsWith("_count")) return;
 
-    const parts = key.split("_");
-    const clinicId = parts[1];
-    const entryDate = parts[2];
-    if (!clinicId || !entryDate) return;
+    const match = key.match(/^od_(.+)_(\d{4}-\d{2}-\d{2})_count$/);
+    if (!match) return;
 
-    const doctorKey = `od_${clinicId}_${entryDate}_doctor`;
+    const parsedClinicId = match[1];
+    const entryDate = match[2];
+    const doctorKey = `od_${parsedClinicId}_${entryDate}_doctor`;
     const doctorValue = String(formData.get(doctorKey) ?? "").trim();
     const countValue = Number(value) || 0;
 
+    if (!doctorValue && countValue === 0) return;
+
     rows.push({
       center_id: centerId,
-      clinic_id: clinicId,
+      clinic_id: parsedClinicId,
       entry_date: entryDate,
       doctor_name: doctorValue || null,
       patient_count: countValue,
@@ -666,13 +782,166 @@ export async function saveOwnerDailyClinicSheet(formData: FormData) {
   }
 
   revalidatePath("/dashboard/owner-daily");
-  const parsed = new Date(rows[0]?.entry_date ?? "");
-  if (!Number.isNaN(parsed.getTime())) {
-    const y = parsed.getFullYear();
-    const m = parsed.getMonth() + 1;
-    revalidateTag(`owner-daily-rows-${centerId}-${y}-${m}`, "max");
-  }
+  revalidatePath("/dashboard/reports");
+  revalidateTag("owner-daily-rows", "max");
   redirect(
     `/dashboard/owner-daily?${resultParams.toString()}&success=${encodeURIComponent("تم الحفظ وبقيت القيم ظاهرة للتعديل")}`,
+  );
+}
+
+export async function importOwnerDailyCsv(formData: FormData) {
+  const actor = await requireAuth();
+  if (actor.role !== "center_manager" || !actor.center_id) {
+    redirect(`/dashboard/owner-daily?error=${encodeURIComponent("غير مصرح")}`);
+  }
+
+  const file = formData.get("csvFile");
+  if (!(file instanceof File) || file.size === 0) {
+    redirect(
+      `/dashboard/owner-daily?error=${encodeURIComponent("اختر ملف CSV صالح")}`,
+    );
+  }
+
+  const month = Number(formData.get("month")) || new Date().getMonth() + 1;
+  const year = Number(formData.get("year")) || new Date().getFullYear();
+  const centerId = actor.center_id;
+  const resultParams = new URLSearchParams({
+    month: String(month),
+    year: String(year),
+  });
+
+  const text = (await file.text()).replace(/^\uFEFF/, "");
+  const rows = parseCsvRows(text);
+  if (rows.length < 2) {
+    redirect(
+      `/dashboard/owner-daily?${resultParams.toString()}&error=${encodeURIComponent("ملف CSV فارغ أو بدون بيانات")}`,
+    );
+  }
+
+  const columnMap = resolveOwnerDailyCsvColumns(rows[0]);
+  const { dateIdx, clinicIdIdx, clinicNameIdx, doctorIdx, countIdx } = columnMap;
+
+  if (dateIdx < 0 || (clinicIdIdx < 0 && clinicNameIdx < 0)) {
+    redirect(
+      `/dashboard/owner-daily?${resultParams.toString()}&error=${encodeURIComponent(
+        "الأعمدة المطلوبة: التاريخ واسم العيادة. استخدم قالب CSV من الصفحة.",
+      )}`,
+    );
+  }
+
+  const supabase = await createClient();
+  const { data: clinics } = await supabase
+    .from("clinics")
+    .select("id, name")
+    .eq("center_id", centerId)
+    .order("name");
+
+  const clinicByName = new Map<string, string>(
+    (clinics ?? []).map((c) => [normalizeOwnerEntityName(c.name), c.id]),
+  );
+
+  const upsertRows: {
+    center_id: string;
+    clinic_id: string;
+    entry_date: string;
+    doctor_name: string | null;
+    patient_count: number;
+    created_by: string;
+  }[] = [];
+
+  let skipped = 0;
+  let skippedDate = 0;
+  let skippedClinic = 0;
+  let skippedEmpty = 0;
+
+  for (let i = 1; i < rows.length; i += 1) {
+    const row = rows[i];
+    const rawDate = row[dateIdx];
+    if (!rawDate) {
+      skipped += 1;
+      skippedDate += 1;
+      continue;
+    }
+
+    const clinicId = resolveClinicIdForOwnerDailyRow({
+      rowClinicId: clinicIdIdx >= 0 ? row[clinicIdIdx] : "",
+      rowClinicName: clinicNameIdx >= 0 ? (row[clinicNameIdx] ?? "") : "",
+      clinicByName,
+    });
+    if (!clinicId) {
+      skipped += 1;
+      skippedClinic += 1;
+      continue;
+    }
+
+    const dateParts = parseOwnerEntryDateParts(rawDate);
+    if (!dateParts) {
+      skipped += 1;
+      skippedDate += 1;
+      continue;
+    }
+
+    if (dateParts.month !== month || dateParts.year !== year) {
+      skipped += 1;
+      skippedDate += 1;
+      continue;
+    }
+
+    const doctorValue = doctorIdx >= 0 ? String(row[doctorIdx] ?? "").trim() : "";
+    const countValue = countIdx >= 0 ? Number(row[countIdx]) || 0 : 0;
+
+    if (!doctorValue && countValue === 0) {
+      skipped += 1;
+      skippedEmpty += 1;
+      continue;
+    }
+
+    upsertRows.push({
+      center_id: centerId,
+      clinic_id: clinicId,
+      entry_date: dateParts.iso,
+      doctor_name: doctorValue || null,
+      patient_count: countValue,
+      created_by: actor.id,
+    });
+  }
+
+  if (upsertRows.length === 0) {
+    const details = [
+      skippedDate > 0 ? `${skippedDate} بتاريخ أو شهر غير مطابق` : "",
+      skippedClinic > 0 ? `${skippedClinic} باسم عيادة غير معروف` : "",
+      skippedEmpty > 0 ? `${skippedEmpty} فارغة` : "",
+    ]
+      .filter(Boolean)
+      .join("، ");
+    redirect(
+      `/dashboard/owner-daily?${resultParams.toString()}&error=${encodeURIComponent(
+        details
+          ? `لم يتم استيراد أي صف: ${details}. حمّل القالب واملأ صفاً لكل يوم وعيادة.`
+          : "لم يتم استيراد أي صف. تحقق من تنسيق الملف.",
+      )}`,
+    );
+  }
+
+  const { error } = await supabase.from("owner_daily_clinic_sheet").upsert(upsertRows, {
+    onConflict: "center_id,clinic_id,entry_date",
+  });
+
+  if (error) {
+    redirect(
+      `/dashboard/owner-daily?${resultParams.toString()}&error=${encodeURIComponent(error.message)}`,
+    );
+  }
+
+  revalidatePath("/dashboard/owner-daily");
+  revalidatePath("/dashboard/reports");
+  revalidateTag("owner-daily-rows", "max");
+
+  const successMessage =
+    skipped > 0
+      ? `تم استيراد ${upsertRows.length} صف وتخطي ${skipped} صف`
+      : `تم استيراد ${upsertRows.length} صف بنجاح`;
+  redirect(
+    `/dashboard/owner-daily?${resultParams.toString()}&success=${encodeURIComponent(successMessage)}`,
   );
 }

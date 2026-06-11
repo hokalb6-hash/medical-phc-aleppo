@@ -32,14 +32,14 @@ export function ClinicReportsSourceTabs({ active, tabs }: Props) {
                 className={clsx(
                   "flex h-full flex-col rounded-xl px-4 py-3 text-right transition",
                   isActive
-                    ? "border border-blue-200 bg-gradient-to-br from-blue-50 to-white shadow-sm ring-1 ring-blue-100/80"
+                    ? "border border-sy-green-200 bg-gradient-to-br from-sy-green-50 to-white shadow-sm ring-1 ring-sy-green-100/80"
                     : "border border-transparent hover:border-slate-200 hover:bg-slate-50/90",
                 )}
               >
                 <span
                   className={clsx(
                     "text-sm font-semibold",
-                    isActive ? "text-blue-900" : "text-slate-800",
+                    isActive ? "text-sy-green-900" : "text-slate-800",
                   )}
                 >
                   {tab.label}

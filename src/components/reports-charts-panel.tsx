@@ -15,14 +15,14 @@ import {
 } from "recharts";
 
 const PIE_COLORS = [
-  "#1d4ed8",
-  "#0d9488",
-  "#b45309",
-  "#7c3aed",
-  "#be123c",
-  "#15803d",
-  "#0369a1",
-  "#a21caf",
+  "#007a3d",
+  "#ce1126",
+  "#c8a028",
+  "#005c2f",
+  "#1c1c1c",
+  "#6fbf8f",
+  "#a60e1f",
+  "#004d26",
 ];
 
 export type CellBarPoint = { day: number; date: string; patients: number };
@@ -91,7 +91,7 @@ export function ReportsChartsPanel({
                   />
                   <Bar
                     dataKey="patients"
-                    fill="#0d9488"
+                    fill="#007a3d"
                     radius={[4, 4, 0, 0]}
                     name="العدد"
                   />

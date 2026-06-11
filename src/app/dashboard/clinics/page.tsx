@@ -1,6 +1,13 @@
 import { requireAuth } from "@/lib/auth";
-import { createClinic } from "@/app/dashboard/actions";
-import { createClient } from "@/lib/supabase/server";
+import { createClinic, deleteClinic } from "@/app/dashboard/actions";
+import {
+  getCachedAllClinics,
+  getCachedClinicsByCenter,
+  getCachedCentersList,
+} from "@/lib/cached-queries";
+import { SpeechSubmitButton } from "@/components/speech-submit-button";
+import { DeleteConfirmForm } from "@/components/delete-confirm-form";
+import { getClinicsWithProtectedData } from "@/lib/clinic-data-guard";
 
 type SearchParams =
   | Record<string, string | string[] | undefined>
@@ -16,33 +23,25 @@ export default async function ClinicsPage({
   searchParams: SearchParams;
 }) {
   const profile = await requireAuth();
-  const supabase = await createClient();
   const params = await Promise.resolve(searchParams);
   const error = asSingle(params.error);
   const success = asSingle(params.success);
 
   const centerId = profile.role === "super_admin" ? null : profile.center_id;
 
-  const centersPromise =
+  const [centers, clinics] = await Promise.all([
     profile.role === "super_admin"
-      ? supabase.from("medical_centers").select("id, name").order("name")
-      : Promise.resolve({ data: [] as { id: string; name: string }[] });
-
-  const clinicsQuery = centerId
-    ? supabase
-        .from("clinics")
-        .select("id, name, clinic_type, medical_centers(name)")
-        .eq("center_id", centerId)
-        .order("created_at", { ascending: false })
-    : supabase
-        .from("clinics")
-        .select("id, name, clinic_type, medical_centers(name)")
-        .order("created_at", { ascending: false });
-
-  const [{ data: centers }, { data: clinics }] = await Promise.all([
-    centersPromise,
-    clinicsQuery,
+      ? getCachedCentersList()
+      : Promise.resolve([] as { id: string; name: string }[]),
+    centerId
+      ? getCachedClinicsByCenter(centerId)
+      : getCachedAllClinics(),
   ]);
+
+  const clinicsWithData =
+    profile.role === "center_manager"
+      ? await getClinicsWithProtectedData((clinics ?? []).map((c) => c.id))
+      : new Set<string>();
 
   function getCenterName(
     relation: { name: string } | { name: string }[] | null,
@@ -61,7 +60,7 @@ export default async function ClinicsPage({
         </div>
       ) : null}
       {success ? (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+        <div className="rounded-xl border border-sy-green-200 bg-sy-green-50 px-4 py-3 text-sm text-sy-green-700">
           {success}
         </div>
       ) : null}
@@ -83,9 +82,9 @@ export default async function ClinicsPage({
             <input name="name" required placeholder="اسم العيادة" className="field-input" />
             <input name="clinicType" required placeholder="نوع العيادة (نسائية، أسنان...)" className="field-input" />
           </div>
-          <button type="submit" className="btn-primary">
+          <SpeechSubmitButton speech="clinic" className="btn-primary">
             حفظ العيادة
-          </button>
+          </SpeechSubmitButton>
         </form>
       ) : null}
 
@@ -96,6 +95,9 @@ export default async function ClinicsPage({
               <th className="px-3 py-2">اسم العيادة</th>
               <th className="px-3 py-2">النوع</th>
               <th className="px-3 py-2">المركز</th>
+              {profile.role !== "center_user" ? (
+                <th className="px-3 py-2">إجراءات</th>
+              ) : null}
             </tr>
           </thead>
           <tbody>
@@ -103,7 +105,31 @@ export default async function ClinicsPage({
               <tr key={clinic.id} className="border-t border-slate-100">
                 <td className="px-3 py-2 font-medium">{clinic.name}</td>
                 <td className="px-3 py-2">{clinic.clinic_type}</td>
-                <td className="px-3 py-2">{getCenterName(clinic.medical_centers)}</td>
+                <td className="px-3 py-2">{getCenterName(clinic.medical_centers ?? null)}</td>
+                {profile.role !== "center_user" ? (
+                  <td className="px-3 py-2">
+                    {profile.role === "center_manager" && clinicsWithData.has(clinic.id) ? (
+                      <span
+                        className="text-xs text-amber-700"
+                        title="تحتوي على إدخالات يومية أو استمارات أو تقارير محفوظة"
+                      >
+                        لا يمكن الحذف — بها بيانات
+                      </span>
+                    ) : (
+                      <DeleteConfirmForm
+                        action={deleteClinic}
+                        idFieldName="clinicId"
+                        entityId={clinic.id}
+                        entityName={clinic.name}
+                        confirmMessage={
+                          profile.role === "center_manager"
+                            ? "هل أنت متأكد من حذف العيادة «{name}»؟\n\nهذه العيادة لا تحتوي على بيانات محفوظة. هذا الإجراء نهائي."
+                            : "هل أنت متأكد من حذف العيادة «{name}»؟\n\nسيتم حذف الإدخالات اليومية والتقارير المرتبطة بها. هذا الإجراء نهائي."
+                        }
+                      />
+                    )}
+                  </td>
+                ) : null}
               </tr>
             ))}
           </tbody>

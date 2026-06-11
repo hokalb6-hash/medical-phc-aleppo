@@ -1,7 +1,16 @@
+import { ExcelDownloadLink } from "@/components/excel-download-link";
+import { CsvImportSuccessSpeech } from "@/components/csv-import-success-speech";
+import { CsvTemplateDownloadLink } from "@/components/csv-template-download-link";
+import { SpeechSubmitButton } from "@/components/speech-submit-button";
 import { requireAuth } from "@/lib/auth";
-import { unstable_cache } from "next/cache";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { saveOwnerDailyClinicSheet } from "@/app/dashboard/actions";
+import { importOwnerDailyCsv, saveOwnerDailyClinicSheet } from "@/app/dashboard/actions";
+import { getCachedCentersList } from "@/lib/cached-queries";
+import { MONTHS_AR } from "@/lib/constants";
+import {
+  buildOwnerDailyRowMap,
+  fetchOwnerDailySheetRows,
+} from "@/lib/owner-daily-data";
 
 type SearchParams =
   | Record<string, string | string[] | undefined>
@@ -33,145 +42,102 @@ export default async function OwnerDailyPage({
   const year = Number(asSingle(params.year)) || now.getFullYear();
   const selectedCenterId =
     (asSingle(params.centerId) ?? profile.center_id ?? "").toString();
-  const selectedClinicFromParams = (asSingle(params.clinicId) ?? "").toString();
+  const centers =
+    profile.role === "super_admin" ? await getCachedCentersList() : [];
 
-  const getCenters = unstable_cache(
-    async () =>
-      admin.from("medical_centers").select("id, name").order("name"),
-    ["owner-daily-centers"],
-    { revalidate: 60, tags: ["owner-daily-centers"] },
-  );
+  const centerId = profile.role === "super_admin" ? selectedCenterId : profile.center_id ?? "";
 
-  const { data: centers } =
-    profile.role === "super_admin"
-      ? await getCenters()
-      : { data: [] as { id: string; name: string }[] };
-
-  const clinicsQuery =
-    profile.role === "super_admin"
-      ? selectedCenterId
-        ? unstable_cache(
-            async () =>
-              admin
-                .from("clinics")
-                .select("id, name")
-                .eq("center_id", selectedCenterId)
-                .order("name"),
-            ["owner-daily-clinics", selectedCenterId],
-            {
-              revalidate: 30,
-              tags: ["owner-daily-clinics", `owner-daily-clinics-${selectedCenterId}`],
-            },
-          )()
-        : Promise.resolve({ data: [] as { id: string; name: string }[] })
-      : unstable_cache(
-          async () =>
-            admin
-              .from("clinics")
-              .select("id, name")
-              .eq("center_id", profile.center_id)
-              .order("name"),
-          ["owner-daily-clinics", profile.center_id ?? ""],
-          {
-            revalidate: 30,
-            tags: ["owner-daily-clinics", `owner-daily-clinics-${profile.center_id ?? ""}`],
-          },
-        )();
-
-  const { data: clinics } = await clinicsQuery;
-  const centerId = profile.role === "super_admin" ? selectedCenterId : profile.center_id!;
-  const selectedClinicId = selectedClinicFromParams || (clinics?.[0]?.id ?? "");
-  const selectedClinic =
-    profile.role === "center_manager"
-      ? (clinics ?? []).find((c) => c.id === selectedClinicId) ?? null
-      : null;
+  const { data: clinics } = centerId
+    ? await admin.from("clinics").select("id, name").eq("center_id", centerId).order("name")
+    : { data: [] as { id: string; name: string }[] };
 
   const daysInMonth = new Date(year, month, 0).getDate();
-  const from = formatDate(year, month, 1);
-  const to = formatDate(year, month, daysInMonth);
+  const templateHref = `/dashboard/owner-daily/template?month=${month}&year=${year}`;
 
-  const { data: existingRows } =
-    centerId &&
-    (profile.role === "center_manager"
-      ? Boolean(selectedClinicId)
-      : (clinics?.length ?? 0) > 0)
-      ? await unstable_cache(
-          async () =>
-            (() => {
-              let query = admin
-                .from("owner_daily_clinic_sheet")
-                .select("clinic_id, entry_date, doctor_name, patient_count")
-                .eq("center_id", centerId)
-                .gte("entry_date", from)
-                .lte("entry_date", to);
-              if (profile.role === "center_manager") {
-                query = query.eq("clinic_id", selectedClinicId);
-              }
-              return query;
-            })(),
-          [
-            "owner-daily-rows",
-            centerId,
-            profile.role === "center_manager" ? selectedClinicId : "all-clinics",
-            String(year),
-            String(month),
-          ],
-          {
-            revalidate: 20,
-            tags: [
-              "owner-daily-rows",
-              `owner-daily-rows-${centerId}-${year}-${month}`,
-            ],
-          },
-        )()
-      : { data: [] as { clinic_id: string; entry_date: string; doctor_name: string | null; patient_count: number }[] };
+  let existingRows: Awaited<ReturnType<typeof fetchOwnerDailySheetRows>> = [];
+  let fetchError: string | null = null;
 
-  const rowMap = new Map(
-    (existingRows ?? []).map((row) => [
-      `${row.clinic_id}_${row.entry_date}`,
-      { doctor: row.doctor_name ?? "", count: row.patient_count },
-    ]),
-  );
+  if (centerId && (clinics?.length ?? 0) > 0) {
+    try {
+      existingRows = await fetchOwnerDailySheetRows({
+        centerId,
+        year,
+        month,
+      });
+    } catch (e) {
+      fetchError = e instanceof Error ? e.message : "تعذر تحميل بيانات الاستمارة.";
+    }
+  }
+
+  const rowMap = buildOwnerDailyRowMap(existingRows);
+  const savedRowCount = existingRows.filter(
+    (r) => (r.doctor_name?.trim() ?? "") !== "" || (Number(r.patient_count) || 0) > 0,
+  ).length;
+
+  const exportAllHref = `/dashboard/reports/export-owner-daily-workbook?year=${year}&month=${month}`;
+  const exportCenterHref = centerId
+    ? `/dashboard/reports/export-owner-daily-workbook?year=${year}&month=${month}&centerId=${encodeURIComponent(centerId)}`
+    : "";
 
   return (
     <div className="space-y-4">
-      <h2 className="text-xl font-bold text-slate-800">استمارة أصحاب المراكز - اليومية</h2>
+      {profile.role === "center_manager" ? <CsvImportSuccessSpeech /> : null}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-xl font-bold text-slate-800">استمارة أصحاب المراكز — اليومية</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            {profile.role === "super_admin"
+              ? "متابعة الاستمارات المحفوظة لجميع المراكز أو مركز محدد."
+              : "إدخال الطبيب وعدد المرضى يومياً لكل عيادة في المركز."}
+          </p>
+        </div>
+        {profile.role === "super_admin" ? (
+          <div className="flex flex-wrap gap-2">
+            <ExcelDownloadLink href={exportAllHref} className="btn-primary text-sm font-medium">
+              تنزيل Excel — جميع المراكز
+            </ExcelDownloadLink>
+            {exportCenterHref ? (
+              <ExcelDownloadLink href={exportCenterHref} className="btn-emerald text-sm font-medium">
+                تنزيل Excel — المركز المحدد
+              </ExcelDownloadLink>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+
       {error ? (
         <p className="rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</p>
       ) : null}
       {success ? (
-        <p className="rounded-xl bg-emerald-50 p-3 text-sm text-emerald-700">{success}</p>
+        <p className="rounded-xl bg-sy-green-50 p-3 text-sm text-sy-green-700">{success}</p>
+      ) : null}
+      {fetchError ? (
+        <p className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+          {fetchError}
+          <span className="mt-1 block text-xs text-red-700/90">
+            تأكد من تنفيذ ملفات SQL الخاصة بجدول owner_daily_clinic_sheet في Supabase.
+          </span>
+        </p>
       ) : null}
 
-      <form className="surface-card grid gap-3 p-4 md:grid-cols-5">
+      <form className="surface-card grid gap-3 p-4 md:grid-cols-2 lg:grid-cols-5">
         {profile.role === "super_admin" ? (
-          <select name="centerId" defaultValue={selectedCenterId} className="field-select">
+          <select name="centerId" defaultValue={selectedCenterId} className="field-select" required>
             <option value="">اختر المركز</option>
-            {(centers ?? []).map((center) => (
+            {centers.map((center) => (
               <option key={center.id} value={center.id}>
                 {center.name}
               </option>
             ))}
           </select>
         ) : null}
-        {profile.role === "center_manager" ? (
-          <select name="clinicId" defaultValue={selectedClinicId} className="field-select">
-            <option value="">اختر العيادة</option>
-            {(clinics ?? []).map((clinic) => (
-              <option key={clinic.id} value={clinic.id}>
-                {clinic.name}
-              </option>
-            ))}
-          </select>
-        ) : null}
-        <input
-          type="number"
-          name="month"
-          min={1}
-          max={12}
-          defaultValue={month}
-          className="field-input"
-        />
+        <select name="month" defaultValue={String(month)} className="field-select">
+          {MONTHS_AR.map((label, index) => (
+            <option key={label} value={index + 1}>
+              {label}
+            </option>
+          ))}
+        </select>
         <input
           type="number"
           name="year"
@@ -180,119 +146,166 @@ export default async function OwnerDailyPage({
           defaultValue={year}
           className="field-input"
         />
-        <button type="submit" className="btn-dark">
+        <SpeechSubmitButton speech="action" className="btn-dark">
           عرض الجدول
-        </button>
+        </SpeechSubmitButton>
       </form>
 
-      {centerId &&
-      (profile.role === "center_manager"
-        ? Boolean(selectedClinic)
-        : (clinics?.length ?? 0) > 0) ? (
-        profile.role === "super_admin" ? (
-          <div className="space-y-3">
-            <div className="table-shell">
-              <table className="min-w-[900px] text-right text-sm">
-                <thead className="bg-slate-100">
-                  <tr>
-                    <th className="border border-slate-200 px-2 py-2">التاريخ</th>
-                    {(clinics ?? []).map((clinic) => (
-                      <th key={clinic.id} className="border border-slate-200 px-2 py-2">
-                        {clinic.name}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => {
-                    const date = formatDate(year, month, day);
-                    return (
-                      <tr key={date}>
-                        <td className="border border-slate-200 px-2 py-2 font-semibold">
-                          {day}/{month}/{year}
-                        </td>
-                        {(clinics ?? []).map((clinic) => {
-                          const saved = rowMap.get(`${clinic.id}_${date}`);
-                          return (
-                            <td key={`${clinic.id}_${date}`} className="border border-slate-200 p-2">
-                              <div className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
-                                الطبيب: {saved?.doctor || "-"}
-                              </div>
-                              <div className="mt-1 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-800">
-                                العدد: {saved?.count ?? 0}
-                              </div>
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <p className="rounded-lg bg-blue-50 p-3 text-sm text-blue-800">
-              وضع السوبر آدمن: متابعة فقط. لا يمكن التعديل أو الحفظ من هذه الصفحة.
-            </p>
-          </div>
-        ) : (
-          <form action={saveOwnerDailyClinicSheet} className="space-y-3">
-            <input type="hidden" name="clinicId" value={selectedClinic?.id ?? ""} />
-            <input type="hidden" name="month" value={month} />
-            <input type="hidden" name="year" value={year} />
-            <div className="table-shell">
-              <table className="min-w-[500px] text-right text-sm">
-                <thead className="bg-slate-100">
-                  <tr>
-                    <th className="border border-slate-200 px-2 py-2">التاريخ</th>
-                      <th className="border border-slate-200 px-2 py-2">{selectedClinic?.name}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => {
-                    const date = formatDate(year, month, day);
-                    return (
-                      <tr key={date}>
-                        <td className="border border-slate-200 px-2 py-2 font-semibold">
-                          {day}/{month}/{year}
-                        </td>
-                        {(() => {
-                          const saved = rowMap.get(`${selectedClinic?.id}_${date}`);
-                          return (
-                            <td className="border border-slate-200 p-2">
-                              <input
-                                name={`od_${selectedClinic?.id}_${date}_doctor`}
-                                defaultValue={saved?.doctor ?? ""}
-                                placeholder="الطبيب"
-                                className="mb-1 w-full rounded-lg border border-slate-300 px-2 py-1 text-xs"
-                              />
-                              <input
-                                type="number"
-                                min={0}
-                                name={`od_${selectedClinic?.id}_${date}_count`}
-                                defaultValue={saved?.count ?? 0}
-                                placeholder="العدد"
-                                className="w-full rounded-lg border border-slate-300 px-2 py-1 text-xs"
-                              />
-                            </td>
-                          );
-                        })()}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            <button type="submit" className="btn-primary">
-              حفظ الاستمارة اليومية
+      {profile.role === "center_manager" ? (
+        <form
+          action={importOwnerDailyCsv}
+          className="surface-card space-y-3 border-sy-green-200 bg-sy-green-50 p-4"
+        >
+          <h3 className="text-base font-semibold text-sy-green-900">استيراد CSV للاستمارة اليومية</h3>
+          <p className="text-xs leading-relaxed text-sy-green-900">
+            حمّل القالب واملأ صفاً لكل <strong>يوم وعيادة</strong>: التاريخ، اسم العيادة، الطبيب،
+            عدد المرضى، الشهر، السنة. بعد الاستيراد تظهر كل العيادات في الجدول أدناه.
+          </p>
+          <input type="hidden" name="month" value={month} />
+          <input type="hidden" name="year" value={year} />
+          <div className="grid gap-3 md:grid-cols-3">
+            <input
+              type="file"
+              name="csvFile"
+              accept=".csv,text/csv"
+              required
+              className="field-input border-sy-green-300"
+            />
+            <button type="submit" className="btn-emerald">
+              استيراد CSV
             </button>
-          </form>
-        )
+          </div>
+          <CsvTemplateDownloadLink
+            href={templateHref}
+            managerName={profile.full_name}
+            className="inline-block rounded-xl bg-white px-4 py-2 text-sm font-semibold text-sy-green-700 ring-1 ring-sy-green-300"
+          >
+            تحميل Template CSV
+          </CsvTemplateDownloadLink>
+        </form>
+      ) : null}
+
+      {centerId && (clinics?.length ?? 0) > 0 ? (
+        <>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
+            <span className="rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-800">
+              {MONTHS_AR[month - 1]} {year}
+            </span>
+            <span className="rounded-full bg-sy-green-50 px-3 py-1 font-medium text-sy-green-900">
+              {savedRowCount} سجل محفوظ
+            </span>
+          </div>
+
+          {profile.role === "super_admin" ? (
+            <div className="space-y-3">
+              <div className="table-shell">
+                <table className="min-w-[900px] text-right text-sm">
+                  <thead className="bg-slate-100">
+                    <tr>
+                      <th className="border border-slate-200 px-2 py-2">التاريخ</th>
+                      {(clinics ?? []).map((clinic) => (
+                        <th key={clinic.id} className="border border-slate-200 px-2 py-2">
+                          {clinic.name}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => {
+                      const date = formatDate(year, month, day);
+                      return (
+                        <tr key={date}>
+                          <td className="border border-slate-200 px-2 py-2 font-semibold">
+                            {day}/{month}/{year}
+                          </td>
+                          {(clinics ?? []).map((clinic) => {
+                            const saved = rowMap.get(`${clinic.id}_${date}`);
+                            return (
+                              <td key={`${clinic.id}_${date}`} className="border border-slate-200 p-2">
+                                <div className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
+                                  الطبيب: {saved?.doctor || "—"}
+                                </div>
+                                <div className="mt-1 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-800">
+                                  العدد: {saved?.count ?? 0}
+                                </div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="rounded-lg bg-sy-green-50 p-3 text-sm text-sy-green-800">
+                وضع السوبر آدمن: متابعة فقط. التعديل يتم من حساب مدير المركز. استخدم «تنزيل Excel — جميع
+                المراكز» للحصول على ملف واحد يضم كل المراكز.
+              </p>
+            </div>
+          ) : (
+            <form action={saveOwnerDailyClinicSheet} className="space-y-3">
+              <input type="hidden" name="month" value={month} />
+              <input type="hidden" name="year" value={year} />
+              <div className="table-shell">
+                <table className="min-w-[900px] text-right text-sm">
+                  <thead className="bg-slate-100">
+                    <tr>
+                      <th className="border border-slate-200 px-2 py-2">التاريخ</th>
+                      {(clinics ?? []).map((clinic) => (
+                        <th key={clinic.id} className="border border-slate-200 px-2 py-2">
+                          <div>{clinic.name}</div>
+                          <div className="mt-1 text-xs font-normal text-slate-500">طبيب / عدد</div>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => {
+                      const date = formatDate(year, month, day);
+                      return (
+                        <tr key={date}>
+                          <td className="border border-slate-200 px-2 py-2 font-semibold">
+                            {day}/{month}/{year}
+                          </td>
+                          {(clinics ?? []).map((clinic) => {
+                            const saved = rowMap.get(`${clinic.id}_${date}`);
+                            return (
+                              <td key={`${clinic.id}_${date}`} className="border border-slate-200 p-2">
+                                <input
+                                  name={`od_${clinic.id}_${date}_doctor`}
+                                  defaultValue={saved?.doctor ?? ""}
+                                  placeholder="الطبيب"
+                                  className="mb-1 w-full rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                                />
+                                <input
+                                  type="number"
+                                  min={0}
+                                  name={`od_${clinic.id}_${date}_count`}
+                                  defaultValue={saved?.count ?? 0}
+                                  placeholder="العدد"
+                                  className="w-full rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                                />
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <button type="submit" className="btn-primary">
+                حفظ الاستمارة اليومية
+              </button>
+            </form>
+          )}
+        </>
       ) : (
         <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-700">
           {profile.role === "center_manager"
-            ? "اختر عيادة لعرض الاستمارة اليومية."
-            : "اختر مركزًا (للسوبر آدمن) وتأكد من وجود عيادات لعرض الجدول."}
+            ? "لا توجد عيادات في المركز. أنشئ عيادة واحدة على الأقل أولاً."
+            : "اختر مركزاً من القائمة ثم اضغط «عرض الجدول»."}
         </p>
       )}
     </div>

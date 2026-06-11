@@ -11,7 +11,7 @@ export function ReportsSection({ step, title, description, children }: ReportsSe
       <header className="mb-4 flex flex-col gap-1 border-b border-slate-200/90 pb-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex items-start gap-3">
           <span
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-blue-600 to-blue-800 text-xs font-bold text-white shadow-md ring-2 ring-blue-100"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sy-green-600 to-sy-green-800 text-xs font-bold text-white shadow-md ring-2 ring-sy-green-100"
             aria-hidden
           >
             {step}

@@ -16,18 +16,18 @@ import {
 } from "recharts";
 
 const PIE_COLORS = [
-  "#1d4ed8",
-  "#0d9488",
-  "#b45309",
-  "#7c3aed",
-  "#be123c",
-  "#15803d",
-  "#0369a1",
-  "#a21caf",
-  "#0f766e",
-  "#c026d3",
-  "#ea580c",
-  "#4f46e5",
+  "#007a3d",
+  "#ce1126",
+  "#c8a028",
+  "#005c2f",
+  "#1c1c1c",
+  "#6fbf8f",
+  "#a60e1f",
+  "#004d26",
+  "#d4eddf",
+  "#8b6914",
+  "#e85d6f",
+  "#003d1f",
 ];
 
 type SuperAdminReportsChartsPanelProps = {
@@ -83,7 +83,7 @@ export function SuperAdminReportsChartsPanel({
                     interval={0}
                   />
                   <Tooltip formatter={(value) => [Number(value) || 0, "المجموع"]} />
-                  <Bar dataKey="value" fill="#1d4ed8" radius={[0, 6, 6, 0]} name="المجموع" />
+                  <Bar dataKey="value" fill="#007a3d" radius={[0, 6, 6, 0]} name="المجموع" />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -109,9 +109,9 @@ export function SuperAdminReportsChartsPanel({
                   <Line
                     type="monotone"
                     dataKey="value"
-                    stroke="#0d9488"
+                    stroke="#007a3d"
                     strokeWidth={2.5}
-                    dot={{ r: 4, fill: "#0f766e" }}
+                    dot={{ r: 4, fill: "#005c2f" }}
                     activeDot={{ r: 6 }}
                     name="المجموع"
                   />

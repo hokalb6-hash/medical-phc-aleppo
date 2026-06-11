@@ -46,7 +46,7 @@ export function MonthlyTrendChart({ data, heading }: MonthlyTrendChartProps) {
               formatter={(value) => [Number(value) || 0, "المجموع"]}
               labelFormatter={(label) => `اليوم ${label}`}
             />
-            <Line type="monotone" dataKey="value" name="المجموع" stroke="#1d4ed8" strokeWidth={2} dot={{ r: 3 }} />
+            <Line type="monotone" dataKey="value" name="المجموع" stroke="#007a3d" strokeWidth={2} dot={{ r: 3 }} />
           </LineChart>
         </ResponsiveContainer>
       </div>

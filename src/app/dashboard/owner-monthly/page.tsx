@@ -1,7 +1,9 @@
+import { SpeechSubmitButton } from "@/components/speech-submit-button";
 import { requireAuth } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { DAILY_FIELDS, MONTHS_AR } from "@/lib/constants";
 import { aggregateDailyEntriesByMonthForCenter } from "@/lib/owner-monthly-from-daily";
+import { getCachedCentersList } from "@/lib/cached-queries";
 
 type SearchParams =
   | Record<string, string | string[] | undefined>
@@ -27,7 +29,7 @@ export default async function OwnerMonthlyPage({
 
   const { data: centers } =
     profile.role === "super_admin"
-      ? await supabase.from("medical_centers").select("id, name").order("name")
+      ? { data: await getCachedCentersList() }
       : { data: [] as { id: string; name: string }[] };
 
   const centerId = profile.role === "super_admin" ? selectedCenterId : profile.center_id!;
@@ -80,12 +82,12 @@ export default async function OwnerMonthlyPage({
           defaultValue={year}
           className="field-input"
         />
-        <button
-          type="submit"
+        <SpeechSubmitButton
+          speech="action"
           className="btn-dark h-9 w-fit justify-self-start whitespace-nowrap px-3 text-sm"
         >
           عرض السنة
-        </button>
+        </SpeechSubmitButton>
       </form>
 
       {centerId ? (
@@ -130,7 +132,7 @@ export default async function OwnerMonthlyPage({
             </table>
           </div>
           {profile.role === "super_admin" ? (
-            <p className="rounded-lg bg-blue-50 p-3 text-sm text-blue-800">
+            <p className="rounded-lg bg-sy-green-50 p-3 text-sm text-sy-green-800">
               وضع المشرف العام: عرض تجميعي للمركز المختار فقط، دون إمكانية التعديل.
             </p>
           ) : null}

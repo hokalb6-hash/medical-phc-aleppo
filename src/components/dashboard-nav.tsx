@@ -27,12 +27,13 @@ export function DashboardNav({ items }: DashboardNavProps) {
           <Link
             key={item.href}
             href={item.href}
+            prefetch={true}
             aria-current={isActive ? "page" : undefined}
             className={clsx(
               "group block rounded-xl px-3 py-2.5 text-sm font-medium transition-colors duration-200",
               isActive
-                ? "bg-blue-600 text-white shadow-sm"
-                : "text-slate-700 hover:bg-slate-100",
+                ? "bg-sy-green text-white shadow-sm"
+                : "text-sy-green-900 hover:bg-sy-green-50",
             )}
           >
             <span className="line-clamp-2">{item.label}</span>

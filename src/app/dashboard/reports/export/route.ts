@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getCurrentUserProfile } from "@/lib/auth";
 import { DAILY_FIELDS, MONTHS_AR } from "@/lib/constants";
 import { aggregateDailyEntriesByMonthForCenter } from "@/lib/owner-monthly-from-daily";
+import { fetchOwnerDailySheetRows } from "@/lib/owner-daily-data";
 
 function csvEscape(value: string | number | null | undefined) {
   const str = String(value ?? "");
@@ -36,6 +37,57 @@ export async function GET(request: Request) {
   /** تجميع مركز كامل لسنة — مطابق لجدول الاستمارة الشهرية في تقارير العيادات */
   const ownerMonthlyCenterExport =
     searchParams.get("exportType") === "owner_monthly_center";
+
+  const ownerDailyClinicExport =
+    searchParams.get("exportType") === "owner_daily_clinic";
+
+  if (ownerDailyClinicExport) {
+    const centerIdResolved =
+      profile.role === "super_admin" ? centerIdParam : (profile.center_id ?? "");
+
+    if (!centerIdResolved || !clinicId) {
+      return NextResponse.json(
+        { error: "المركز والعيادة مطلوبان" },
+        { status: 400 },
+      );
+    }
+
+    if (profile.role === "center_manager" && profile.center_id !== centerIdResolved) {
+      return NextResponse.json({ error: "غير مصرح." }, { status: 403 });
+    }
+
+    if (!month || !year) {
+      return NextResponse.json({ error: "الشهر والسنة مطلوبان" }, { status: 400 });
+    }
+
+    try {
+      const rows = await fetchOwnerDailySheetRows({
+        centerId: centerIdResolved,
+        clinicId,
+        year,
+        month,
+      });
+
+      const header = ["التاريخ", "الطبيب", "العدد"];
+      const lines = [header.map(csvEscape).join(",")];
+      for (const row of rows) {
+        lines.push(
+          [row.entry_date, row.doctor_name, row.patient_count].map(csvEscape).join(","),
+        );
+      }
+
+      const csv = toExcelFriendlyCsv(lines);
+      return new NextResponse(csv, {
+        headers: {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": `attachment; filename="owner-daily-clinic-${year}-${month}.csv"`,
+        },
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "خطأ غير معروف";
+      return NextResponse.json({ error: message }, { status: 500 });
+    }
+  }
 
   if (ownerMonthlyCenterExport) {
     const centerIdResolved =

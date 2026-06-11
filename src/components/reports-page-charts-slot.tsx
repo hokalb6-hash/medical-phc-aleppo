@@ -2,6 +2,9 @@
 
 import dynamic from "next/dynamic";
 import type { CellBarPoint, DoctorSlice } from "@/components/reports-charts-panel";
+import type { SuperChartsPayload } from "@/lib/cached-queries";
+
+export type { SuperChartsPayload };
 
 const SuperAdminReportsChartsPanel = dynamic(
   () =>
@@ -32,14 +35,6 @@ const ReportsChartsPanel = dynamic(
     ),
   },
 );
-
-export type SuperChartsPayload = {
-  monthLabel: string;
-  year: number;
-  centerBars: { name: string; value: number }[];
-  yearLine: { label: string; value: number; month?: number }[];
-  topFieldSlices: { name: string; value: number }[];
-};
 
 export type ClinicChartsPayload = {
   trendData: { day: number; value: number }[];

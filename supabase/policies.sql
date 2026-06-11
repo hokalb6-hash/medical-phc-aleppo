@@ -56,6 +56,12 @@ with check (
   or (id = public.current_center_id() and public.current_role() = 'center_manager')
 );
 
+drop policy if exists "centers_delete_super_admin" on public.medical_centers;
+create policy "centers_delete_super_admin"
+on public.medical_centers
+for delete
+using (public.current_role() = 'super_admin');
+
 -- profiles
 drop policy if exists "profiles_select" on public.profiles;
 create policy "profiles_select"
@@ -146,6 +152,12 @@ with check (
     and center_id = public.current_center_id()
   )
 );
+
+drop policy if exists "clinics_delete_super_admin" on public.clinics;
+create policy "clinics_delete_super_admin"
+on public.clinics
+for delete
+using (public.current_role() = 'super_admin');
 
 -- daily_entries
 drop policy if exists "daily_entries_select" on public.daily_entries;

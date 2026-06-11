@@ -1,14 +1,10 @@
 import { NextResponse } from "next/server";
-import { DAILY_FIELDS } from "@/lib/constants";
 import { getCurrentUserProfile } from "@/lib/auth";
-
-function csvEscape(value: string | number | null | undefined) {
-  const str = String(value ?? "");
-  if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-}
+import { createClient } from "@/lib/supabase/server";
+import {
+  buildDailyEntryCsvContent,
+  buildDailyEntryCsvSampleRows,
+} from "@/lib/daily-entry-csv";
 
 export async function GET() {
   const profile = await getCurrentUserProfile();
@@ -16,27 +12,22 @@ export async function GET() {
     return NextResponse.json({ error: "غير مصرح" }, { status: 401 });
   }
 
-  const headers = [
-    "entry_date",
-    "clinic_id",
-    "clinic_name",
-    "month",
-    "year",
-    ...DAILY_FIELDS.map((f) => f.key),
-  ];
+  const supabase = await createClient();
+  const centerId = profile.center_id;
 
-  const sample = [
-    "2026-05-06",
-    "",
-    "العيادة الداخلية",
-    "5",
-    "2026",
-    ...DAILY_FIELDS.map(() => "0"),
-  ];
+  let centerName = "";
+  if (centerId) {
+    const { data } = await supabase
+      .from("medical_centers")
+      .select("name")
+      .eq("id", centerId)
+      .maybeSingle();
+    centerName = data?.name ?? "";
+  }
 
-  const csv = `\uFEFF${headers.map(csvEscape).join(",")}\r\n${sample
-    .map(csvEscape)
-    .join(",")}\r\n`;
+  const csv = buildDailyEntryCsvContent(
+    buildDailyEntryCsvSampleRows({ centerName }),
+  );
 
   return new NextResponse(csv, {
     headers: {

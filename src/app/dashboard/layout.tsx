@@ -2,6 +2,8 @@ import { redirect } from "next/navigation";
 import { requireAuth } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { DashboardNav } from "@/components/dashboard-nav";
+import { SignOutForm } from "@/components/sign-out-form";
+import { SuperAdminWelcomeSpeech } from "@/components/super-admin-welcome-speech";
 import { ROLE_LABELS_AR } from "@/lib/constants";
 
 export default async function DashboardLayout({
@@ -33,10 +35,11 @@ export default async function DashboardLayout({
 
   return (
     <div className="min-h-screen p-4 md:p-6 lg:p-8">
+      <SuperAdminWelcomeSpeech role={profile.role} />
       <header className="surface-card mb-6 px-5 py-4 md:px-6 md:py-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white ring-2 ring-amber-200/70 shadow-sm">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white ring-2 ring-sy-gold/50 shadow-sm">
               <img
                 src="/aleppo-eagle.png"
                 alt="شعار النظام"
@@ -52,14 +55,7 @@ export default async function DashboardLayout({
               </p>
             </div>
           </div>
-          <form action={signOut}>
-            <button
-              type="submit"
-              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800"
-            >
-              تسجيل خروج
-            </button>
-          </form>
+          <SignOutForm action={signOut} />
         </div>
       </header>
 
